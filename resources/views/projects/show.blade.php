@@ -4,12 +4,19 @@
             Back to projects
         </a>
 
-        @can('update', $project)
-            <a href="{{ route('projects.edit', $project) }}"
-                class="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                Edit project
+        <div class="flex flex-wrap items-center gap-3">
+            <a href="{{ route('projects.tasks.index', $project) }}"
+                class="rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                View tasks
             </a>
-        @endcan
+
+            @can('update', $project)
+                <a href="{{ route('projects.edit', $project) }}"
+                    class="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    Edit project
+                </a>
+            @endcan
+        </div>
     </div>
 
     <div class="grid gap-6 lg:grid-cols-3">

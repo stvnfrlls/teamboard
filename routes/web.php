@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\TaskController;
 use App\Http\Controllers\UserController;
 use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
@@ -22,6 +23,10 @@ Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
         ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
     Route::resource('users', UserController::class)
         ->only(['index', 'create', 'store', 'edit', 'update']);
+    Route::scopeBindings()->group(function () {
+        Route::resource('projects.tasks', TaskController::class)
+            ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
+    });
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');

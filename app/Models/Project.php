@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Project extends Model
 {
@@ -20,6 +21,27 @@ class Project extends Model
         'description',
         'created_by',
     ];
+
+    protected $attributes = [
+        'next_task_number' => 1,
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'next_task_number' => 'integer',
+        ];
+    }
+
+    public function tasks(): HasMany
+    {
+        return $this->hasMany(Task::class);
+    }
+
+    public function assignableMembers(): BelongsToMany
+    {
+        return $this->members()->where('users.is_active', true);
+    }
 
     public function creator(): BelongsTo
     {

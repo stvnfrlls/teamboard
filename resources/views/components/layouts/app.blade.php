@@ -38,7 +38,7 @@
     </header>
 
     <main id="main-content" class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <h1 class="mb-6 text-2xl font-semibold tracking-tight">{{ $title }}</h1>
+        <h1 class="mb-6 break-words text-2xl font-semibold tracking-tight">{{ $title }}</h1>
         @if (session('status'))
             <div role="status"
                 class="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
