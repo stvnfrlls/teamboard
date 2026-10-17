@@ -80,5 +80,6 @@
             </dl>
         </section>
     </div>
+    @include('tasks.checklist')
     @include('tasks.comments')
 </x-layouts.app>

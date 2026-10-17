@@ -7,6 +7,7 @@ use App\Enums\TaskStatus;
 use App\Enums\UserRole;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskChecklistItem;
 use App\Models\User;
 use App\Services\TaskManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -1076,6 +1077,309 @@ class TaskManagementTest extends TestCase
             ->assertForbidden();
 
         $this->assertSame(0, $task->comments()->count());
+    }
+
+    public function test_members_can_add_checklist_items_with_server_controlled_metadata(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $task = $this->createTask();
+        $otherTask = $this->createTask();
+        $updatedAt = $task->getRawOriginal('updated_at');
+
+        $this->travel(1)->minutes();
+
+        $this->actingAs($member)
+            ->post(
+                route('projects.tasks.checklist.store', [$this->project, $task]),
+                [
+                    'label' => '  Review permissions  ',
+                    'created_by' => $this->admin->id,
+                    'task_id' => $otherTask->id,
+                    'completed_at' => '2000-01-01 00:00:00',
+                ]
+            )
+            ->assertSessionHasNoErrors()
+            ->assertRedirect(
+                route('projects.tasks.show', [$this->project, $task]).'#checklist'
+            );
+
+        $item = $task->checklistItems()->sole();
+
+        $this->assertSame('Review permissions', $item->label);
+        $this->assertSame($member->id, $item->created_by);
+        $this->assertSame($task->id, $item->task_id);
+        $this->assertFalse($item->is_completed);
+        $this->assertNull($item->completed_at);
+        $this->assertSame(0, $item->lock_version);
+        $this->assertSame(0, $otherTask->checklistItems()->count());
+        $this->assertSame(0, $task->fresh()->lock_version);
+        $this->assertSame($updatedAt, $task->fresh()->getRawOriginal('updated_at'));
+    }
+
+    public function test_checklist_completion_preserves_time_until_reopened(): void
+    {
+        $task = $this->createTask();
+        $item = $this->createChecklistItem($task);
+        $url = route('projects.tasks.checklist.update', [$this->project, $task, $item]);
+
+        $this->actingAs($this->admin);
+
+        $this->patch($url, ['is_completed' => true, 'lock_version' => 0])
+            ->assertSessionHasNoErrors()
+            ->assertRedirect();
+
+        $item->refresh();
+        $completedAt = $item->completed_at;
+
+        $this->assertTrue($item->is_completed);
+        $this->assertNotNull($completedAt);
+
+        $this->travel(1)->minutes();
+
+        $this->patch($url, ['is_completed' => true, 'lock_version' => 1])
+            ->assertSessionHasNoErrors();
+
+        $this->assertEquals($completedAt, $item->fresh()->completed_at);
+
+        $this->patch($url, ['is_completed' => false, 'lock_version' => 2])
+            ->assertSessionHasNoErrors();
+
+        $this->assertFalse($item->fresh()->is_completed);
+        $this->assertNull($item->fresh()->completed_at);
+
+        $this->travel(1)->minutes();
+
+        $this->patch($url, ['is_completed' => true, 'lock_version' => 3])
+            ->assertSessionHasNoErrors();
+
+        $item->refresh();
+        $task->refresh();
+
+        $this->assertTrue($item->completed_at->greaterThan($completedAt));
+        $this->assertSame(4, $item->lock_version);
+        $this->assertSame(0, $task->lock_version);
+        $this->assertSame(TaskStatus::Todo, $task->status);
+        $this->assertNull($task->completed_at);
+    }
+
+    public function test_checklist_updates_reject_stale_versions_and_invalid_changes(): void
+    {
+        $task = $this->createTask();
+        $item = $this->createChecklistItem($task);
+        $url = route('projects.tasks.checklist.update', [$this->project, $task, $item]);
+
+        $this->actingAs($this->admin)
+            ->patchJson($url, ['is_completed' => true, 'lock_version' => 0])
+            ->assertRedirect();
+
+        $cases = [
+            [['is_completed' => false, 'lock_version' => 0], 'lock_version'],
+            [['is_completed' => false], 'lock_version'],
+            [['is_completed' => false, 'lock_version' => -1], 'lock_version'],
+            [['is_completed' => ['invalid'], 'lock_version' => 1], 'is_completed'],
+            [['lock_version' => 1], 'is_completed'],
+            [[
+                'is_completed' => false,
+                'lock_version' => 1,
+                'label' => 'Unexpected rename',
+            ], 'label'],
+        ];
+
+        foreach ($cases as [$data, $field]) {
+            $this->patchJson($url, $data)
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors($field);
+        }
+
+        $item->refresh();
+
+        $this->assertTrue($item->is_completed);
+        $this->assertSame(1, $item->lock_version);
+        $this->assertSame('Review behavior', $item->label);
+    }
+
+    public function test_checklist_creation_validates_labels_and_rejects_client_state(): void
+    {
+        $task = $this->createTask();
+        $showUrl = route('projects.tasks.show', [$this->project, $task]);
+        $storeUrl = route('projects.tasks.checklist.store', [$this->project, $task]);
+
+        $this->actingAs($this->admin);
+
+        foreach ([null, '', " \n ", ['invalid'], str_repeat('a', 256)] as $label) {
+            $this->from($showUrl)
+                ->post($storeUrl, ['label' => $label])
+                ->assertRedirect($showUrl)
+                ->assertSessionHasErrors('label');
+
+            $this->get($showUrl)->assertOk();
+        }
+
+        $this->postJson($storeUrl, [
+            'label' => 'Valid label',
+            'is_completed' => true,
+            'lock_version' => 1,
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['is_completed', 'lock_version']);
+
+        $this->assertSame(0, $task->checklistItems()->count());
+    }
+
+    public function test_checklist_writes_require_active_project_access(): void
+    {
+        $task = $this->createTask();
+        $item = $this->createChecklistItem($task);
+        $storeUrl = route('projects.tasks.checklist.store', [$this->project, $task]);
+        $updateUrl = route('projects.tasks.checklist.update', [$this->project, $task, $item]);
+        $update = ['is_completed' => true, 'lock_version' => 0];
+
+        $this->post($storeUrl, ['label' => 'Guest item'])
+            ->assertRedirect(route('login'));
+        $this->patch($updateUrl, $update)
+            ->assertRedirect(route('login'));
+
+        $member = User::factory()->create();
+
+        $this->actingAs($member)
+            ->post($storeUrl, ['label' => 'Outsider item'])
+            ->assertForbidden();
+        $this->patch($updateUrl, $update)->assertForbidden();
+
+        $this->project->members()->attach($member);
+        $this->project->members()->detach($member);
+
+        $this->patch($updateUrl, $update)->assertForbidden();
+
+        $inactive = User::factory()->create(['is_active' => false]);
+        $this->project->members()->attach($inactive);
+
+        $this->actingAs($inactive)
+            ->post($storeUrl, ['label' => 'Inactive item'])
+            ->assertRedirect(route('login'));
+        $this->patch($updateUrl, $update)
+            ->assertRedirect(route('login'));
+
+        $this->assertSame(1, $task->checklistItems()->count());
+        $this->assertFalse($item->fresh()->is_completed);
+    }
+
+    public function test_checklist_items_are_scoped_to_their_task_and_project(): void
+    {
+        $task = $this->createTask();
+        $otherTask = $this->createTask();
+        $item = $this->createChecklistItem($task);
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->actingAs($this->admin);
+
+        foreach (
+            [
+                [$this->project, $otherTask],
+                [$otherProject, $task],
+            ] as [$project, $parentTask]
+        ) {
+            $this->patch(
+                route('projects.tasks.checklist.update', [$project, $parentTask, $item]),
+                ['is_completed' => true, 'lock_version' => 0]
+            )->assertNotFound();
+        }
+
+        $this->assertFalse($item->fresh()->is_completed);
+        $this->assertSame(0, $item->fresh()->lock_version);
+    }
+
+    public function test_checklist_writes_recheck_current_database_access(): void
+    {
+        $task = $this->createTask();
+        $item = $this->createChecklistItem($task);
+        $staleAdmin = $this->admin;
+
+        User::query()->whereKey($staleAdmin->id)->update(['role' => 'member']);
+
+        $this->actingAs($staleAdmin)
+            ->post(
+                route('projects.tasks.checklist.store', [$this->project, $task]),
+                ['label' => 'Revoked access']
+            )
+            ->assertForbidden();
+
+        $this->patch(
+            route('projects.tasks.checklist.update', [$this->project, $task, $item]),
+            ['is_completed' => true, 'lock_version' => 0]
+        )->assertForbidden();
+
+        $this->assertSame(1, $task->checklistItems()->count());
+        $this->assertFalse($item->fresh()->is_completed);
+    }
+
+    public function test_checklist_progress_counts_all_pages_and_labels_are_escaped(): void
+    {
+        $task = $this->createTask();
+        $html = '<script>alert("checklist")</script>';
+        $oldest = $this->createChecklistItem($task, $html);
+        $manager = app(TaskManager::class);
+
+        $manager->saveChecklistItem(
+            $this->admin,
+            $this->project,
+            $task,
+            ['is_completed' => true, 'lock_version' => 0],
+            $oldest
+        );
+
+        for ($number = 1; $number <= 20; $number++) {
+            $this->createChecklistItem($task, 'Pending item '.$number);
+        }
+
+        $otherTask = $this->createTask();
+        $this->createChecklistItem($otherTask, 'Other task checklist');
+
+        $manager->addComment($this->admin, $this->project, $task, 'Existing discussion');
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertDontSeeText('Other task checklist')
+            ->assertViewHas('task', function (Task $shown): bool {
+                return (int) $shown->checklist_items_count === 21
+                    && (int) $shown->completed_checklist_items_count === 1;
+            })
+            ->assertViewHas('checklistItems', function ($items): bool {
+                return $items->total() === 21 && $items->count() === 20;
+            });
+
+        $this->get(route('projects.tasks.show', [
+            'project' => $this->project,
+            'task' => $task,
+            'checklist_page' => 2,
+        ]))
+            ->assertOk()
+            ->assertSee(e($html), false)
+            ->assertDontSee($html, false)
+            ->assertSeeText('Existing discussion')
+            ->assertViewHas('checklistItems', function ($items): bool {
+                return $items->currentPage() === 2 && $items->count() === 1;
+            })
+            ->assertViewHas('comments', function ($comments): bool {
+                return $comments->currentPage() === 1 && $comments->count() === 1;
+            });
+    }
+
+    private function createChecklistItem(
+        Task $task,
+        string $label = 'Review behavior'
+    ): TaskChecklistItem {
+        return app(TaskManager::class)->saveChecklistItem(
+            $this->admin,
+            $this->project,
+            $task,
+            ['label' => $label]
+        );
     }
 
     private function createTask(

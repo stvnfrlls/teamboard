@@ -39,6 +39,11 @@ class Task extends Model
         ];
     }
 
+    public function checklistItems(): HasMany
+    {
+        return $this->hasMany(TaskChecklistItem::class);
+    }
+
     public function comments(): HasMany
     {
         return $this->hasMany(TaskComment::class);

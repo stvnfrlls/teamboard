@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TaskStatus;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskChecklistItem;
 use App\Models\TaskComment;
 use App\Models\User;
 use Illuminate\Support\Arr;
@@ -121,24 +122,12 @@ class TaskManager
         string $body
     ): TaskComment {
         return DB::transaction(function () use ($actor, $project, $task, $body) {
-            $actor = User::query()
-                ->whereKey($actor->getKey())
-                ->lockForUpdate()
-                ->first();
-
-            abort_unless($actor, 403);
-
-            $project = Project::query()
-                ->whereKey($project->getKey())
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            $task = $project->tasks()
-                ->whereKey($task->getKey())
-                ->lockForUpdate()
-                ->firstOrFail();
-
-            Gate::forUser($actor)->authorize('comment', $task);
+            [$actor, $task] = $this->lockTaskFor(
+                $actor,
+                $project,
+                $task,
+                'comment'
+            );
 
             $comment = $task->comments()->make([
                 'body' => $body,
@@ -149,5 +138,84 @@ class TaskManager
 
             return $comment;
         }, 3);
+    }
+
+    public function saveChecklistItem(
+        User $actor,
+        Project $project,
+        Task $task,
+        array $data,
+        ?TaskChecklistItem $item = null
+    ): TaskChecklistItem {
+        return DB::transaction(function () use ($actor, $project, $task, $data, $item) {
+            [$actor, $task] = $this->lockTaskFor(
+                $actor,
+                $project,
+                $task,
+                'update'
+            );
+
+            if ($item !== null) {
+                $item = $task->checklistItems()
+                    ->whereKey($item->getKey())
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                if ($item->lock_version !== (int) $data['lock_version']) {
+                    throw ValidationException::withMessages([
+                        'lock_version' => 'This checklist item was updated by someone else. Reload before saving again.',
+                    ]);
+                }
+
+                $item->is_completed = (bool) $data['is_completed'];
+                $item->completed_at = $item->is_completed
+                    ? ($item->completed_at ?? now())
+                    : null;
+                $item->lock_version++;
+            } else {
+                $item = $task->checklistItems()->make([
+                    'label' => $data['label'],
+                ]);
+
+                $item->creator()->associate($actor);
+            }
+
+            $item->save();
+
+            return $item;
+        }, 3);
+    }
+
+    /**
+     * Call inside a database transaction.
+     *
+     * @return array{0: User, 1: Task}
+     */
+    protected function lockTaskFor(
+        User $actor,
+        Project $project,
+        Task $task,
+        string $ability
+    ): array {
+        $actor = User::query()
+            ->whereKey($actor->getKey())
+            ->lockForUpdate()
+            ->first();
+
+        abort_unless($actor, 403);
+
+        $project = Project::query()
+            ->whereKey($project->getKey())
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        $task = $project->tasks()
+            ->whereKey($task->getKey())
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        Gate::forUser($actor)->authorize($ability, $task);
+
+        return [$actor, $task];
     }
 }

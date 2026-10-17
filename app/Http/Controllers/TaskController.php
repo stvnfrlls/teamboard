@@ -132,7 +132,25 @@ class TaskController extends Controller
             ->withQueryString()
             ->fragment('comments');
 
-        return view('tasks.show', compact('project', 'task', 'comments'));
+        $task->loadCount([
+            'checklistItems',
+            'checklistItems as completed_checklist_items_count' => function (Builder $query) {
+                $query->where('is_completed', true);
+            },
+        ]);
+
+        $checklistItems = $task->checklistItems()
+            ->orderByDesc('id')
+            ->paginate(20, ['*'], 'checklist_page')
+            ->withQueryString()
+            ->fragment('checklist');
+
+        return view('tasks.show', compact(
+            'project',
+            'task',
+            'comments',
+            'checklistItems'
+        ));
     }
 
     public function edit(Project $project, Task $task): View

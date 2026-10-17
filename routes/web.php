@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\TaskChecklistItemController;
 use App\Http\Controllers\TaskCommentController;
 use App\Http\Controllers\TaskController;
 use App\Http\Controllers\UserController;
@@ -35,6 +36,14 @@ Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
             'projects/{project}/tasks/{task}/comments',
             [TaskCommentController::class, 'store']
         )->name('projects.tasks.comments.store');
+        Route::post(
+            'projects/{project}/tasks/{task}/checklist',
+            [TaskChecklistItemController::class, 'store']
+        )->name('projects.tasks.checklist.store');
+        Route::patch(
+            'projects/{project}/tasks/{task}/checklist/{checklistItem}',
+            [TaskChecklistItemController::class, 'update']
+        )->name('projects.tasks.checklist.update');
     });
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
