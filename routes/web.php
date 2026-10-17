@@ -5,6 +5,7 @@ use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\TaskAttachmentController;
 use App\Http\Controllers\TaskChecklistItemController;
 use App\Http\Controllers\TaskCommentController;
 use App\Http\Controllers\TaskController;
@@ -53,6 +54,14 @@ Route::middleware(['auth:web', EnsureUserIsActive::class, 'auth.session'])->grou
             'projects/{project}/tasks/{task}/checklist/{checklistItem}',
             [TaskChecklistItemController::class, 'update']
         )->name('projects.tasks.checklist.update');
+        Route::post(
+            'projects/{project}/tasks/{task}/attachments',
+            [TaskAttachmentController::class, 'store']
+        )->name('projects.tasks.attachments.store');
+        Route::get(
+            'projects/{project}/tasks/{task}/attachments/{attachment}/download',
+            [TaskAttachmentController::class, 'download']
+        )->name('projects.tasks.attachments.download');
     });
 
     Route::get('/notifications', [NotificationController::class, 'index'])

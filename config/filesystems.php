@@ -30,6 +30,16 @@ return [
 
     'disks' => [
 
+        'task_attachments' => [
+            'driver' => 'local',
+            'root' => storage_path('app/task-attachments'),
+            'visibility' => 'private',
+            'directory_visibility' => 'private',
+            'serve' => false,
+            'throw' => true,
+            'report' => false,
+        ],
+
         'local' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),

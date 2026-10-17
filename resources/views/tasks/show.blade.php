@@ -80,6 +80,7 @@
             </dl>
         </section>
     </div>
+    @include('tasks.attachments')
     @include('tasks.checklist')
     @include('tasks.comments')
     @include('tasks.activity')

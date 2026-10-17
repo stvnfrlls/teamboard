@@ -5,14 +5,20 @@ namespace App\Services;
 use App\Enums\TaskStatus;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskAttachment;
 use App\Models\TaskChecklistItem;
 use App\Models\TaskComment;
 use App\Models\User;
 use App\Notifications\TaskAssigned;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
+use Throwable;
 
 class TaskManager
 {
@@ -202,6 +208,72 @@ class TaskManager
 
             return $item;
         }, 3);
+    }
+
+    public function addAttachment(
+        User $actor,
+        Project $project,
+        Task $task,
+        UploadedFile $file
+    ): TaskAttachment {
+        $path = null;
+
+        try {
+            return DB::transaction(function () use ($actor, $project, $task, $file, &$path) {
+                [$actor, $task] = $this->lockTaskFor(
+                    $actor,
+                    $project,
+                    $task,
+                    'update'
+                );
+
+                if ($path === null) {
+                    $path = $file->store(
+                        (string) $task->getKey(),
+                        TaskAttachment::DISK
+                    );
+
+                    if (! is_string($path) || $path === '') {
+                        throw new RuntimeException('Unable to store attachment.');
+                    }
+                }
+
+                $name = basename(str_replace(
+                    '\\',
+                    '/',
+                    $file->getClientOriginalName()
+                ));
+
+                $name = preg_replace('/[\x00-\x1F\x7F]/u', '', $name) ?? '';
+                $name = Str::limit(trim($name), 200, '');
+
+                if ($name === '' || $name === '.' || $name === '..') {
+                    $name = 'attachment';
+                }
+
+                $attachment = $task->attachments()->make([
+                    'original_name' => $name,
+                    'path' => $path,
+                    'mime_type' => $file->getMimeType() ?? 'application/octet-stream',
+                    'size' => $file->getSize(),
+                ]);
+
+                $attachment->uploader()->associate($actor);
+                $attachment->save();
+
+                return $attachment;
+            }, 3);
+        } catch (Throwable $exception) {
+            if (is_string($path) && $path !== '') {
+                try {
+                    Storage::disk(TaskAttachment::DISK)->delete($path);
+                } catch (Throwable $cleanupException) {
+                    report($cleanupException);
+                }
+            }
+
+            throw $exception;
+        }
     }
 
     protected function activitySnapshot(Task $task): array

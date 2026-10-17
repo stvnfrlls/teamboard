@@ -145,6 +145,13 @@ class TaskController extends Controller
             ->withQueryString()
             ->fragment('checklist');
 
+        $attachments = $task->attachments()
+            ->with('uploader:id,name')
+            ->orderByDesc('id')
+            ->paginate(20, ['*'], 'attachments_page')
+            ->withQueryString()
+            ->fragment('attachments');
+
         $activities = $task->activities()
             ->with('actor:id,name')
             ->orderByDesc('id')
@@ -173,7 +180,8 @@ class TaskController extends Controller
             'comments',
             'checklistItems',
             'activities',
-            'activityAssigneeNames'
+            'activityAssigneeNames',
+            'attachments'
         ));
     }
 

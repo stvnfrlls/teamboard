@@ -7,13 +7,17 @@ use App\Enums\TaskStatus;
 use App\Enums\UserRole;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskAttachment;
 use App\Models\TaskChecklistItem;
 use App\Models\User;
 use App\Notifications\TaskAssigned;
 use App\Services\TaskManager;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class TaskManagementTest extends TestCase
@@ -2383,6 +2387,434 @@ class TaskManagementTest extends TestCase
             ->assertOk()
             ->assertSeeText('No activity recorded yet.')
             ->assertViewHas('activities', fn ($items) => $items->total() === 0);
+    }
+
+    public function test_attachment_uploads_use_private_storage_and_server_metadata(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+        Storage::fake('public');
+
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+        $task = $this->createTask();
+        $updatedAt = $task->updated_at->toDateTimeString();
+        $contents = 'Private attachment content.';
+
+        $this->travel(1)->seconds();
+
+        $this->actingAs($member)
+            ->post(
+                route('projects.tasks.attachments.store', [$this->project, $task]),
+                [
+                    'attachment' => UploadedFile::fake()
+                        ->createWithContent('notes.txt', $contents),
+                    'uploaded_by' => $this->admin->id,
+                    'task_id' => -99,
+                    'original_name' => 'forged.txt',
+                    'path' => '../forged.php',
+                    'disk' => 'public',
+                    'mime_type' => 'text/html',
+                    'size' => 999,
+                ]
+            )
+            ->assertSessionHasNoErrors()
+            ->assertRedirect(
+                route('projects.tasks.show', [$this->project, $task]).'#attachments'
+            );
+
+        $attachment = $task->attachments()->sole();
+
+        $this->assertSame($member->id, (int) $attachment->uploaded_by);
+        $this->assertSame($task->id, (int) $attachment->task_id);
+        $this->assertSame('notes.txt', $attachment->original_name);
+        $this->assertSame('text/plain', $attachment->mime_type);
+        $this->assertSame(strlen($contents), $attachment->size);
+        $this->assertNotSame('../forged.php', $attachment->path);
+        $this->assertArrayNotHasKey('path', $attachment->toArray());
+
+        Storage::disk(TaskAttachment::DISK)->assertExists($attachment->path);
+
+        $this->assertSame(
+            $contents,
+            Storage::disk(TaskAttachment::DISK)->get($attachment->path)
+        );
+        $this->assertCount(1, Storage::disk(TaskAttachment::DISK)->allFiles());
+        $this->assertSame([], Storage::disk('public')->allFiles());
+        $this->assertSame($task->lock_version, $task->fresh()->lock_version);
+        $this->assertSame(
+            $updatedAt,
+            $task->fresh()->updated_at->toDateTimeString()
+        );
+        $this->assertSame(1, $task->activities()->count());
+    }
+
+    public function test_members_and_admins_can_download_attachment_contents(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+        $task = $this->createTask();
+        $contents = 'Download these exact bytes.';
+        $attachment = $this->createTaskAttachment($task, 'notes.txt', $contents);
+
+        $url = route('projects.tasks.attachments.download', [
+            $this->project,
+            $task,
+            $attachment,
+        ]);
+
+        foreach ([$member, $this->admin] as $actor) {
+            $response = $this->actingAs($actor)->get($url);
+
+            $response->assertOk()
+                ->assertDownload('notes.txt')
+                ->assertHeader('Content-Type', 'application/octet-stream')
+                ->assertHeader('X-Content-Type-Options', 'nosniff')
+                ->assertStreamedContent($contents);
+
+            $this->assertStringContainsString(
+                'no-store',
+                $response->headers->get('Cache-Control')
+            );
+        }
+    }
+
+    public function test_invalid_and_disguised_attachments_are_rejected(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+        $path = tempnam(sys_get_temp_dir(), 'teamboard-upload-');
+        $this->assertNotFalse($path);
+
+        file_put_contents(
+            $path,
+            '<!DOCTYPE html><html><body><script>alert(1)</script></body></html>'
+        );
+
+        $spoofedFile = new UploadedFile(
+            $path,
+            'preview.png',
+            'image/png',
+            UPLOAD_ERR_OK,
+            true
+        );
+
+        $this->assertSame('text/html', $spoofedFile->getMimeType());
+
+        $cases = [
+            [],
+            ['attachment' => 'not-a-file'],
+            ['attachment' => ['invalid']],
+            ['attachment' => UploadedFile::fake()->create(
+                'large.txt',
+                TaskAttachment::MAX_KILOBYTES + 1,
+                'text/plain'
+            )],
+            ['attachment' => UploadedFile::fake()->create(
+                'script.php',
+                1,
+                'text/plain'
+            )],
+            ['attachment' => $spoofedFile],
+        ];
+
+        $this->actingAs($this->admin);
+
+        try {
+            foreach ($cases as $data) {
+                $this->from(route('projects.tasks.show', [$this->project, $task]))
+                    ->post(
+                        route('projects.tasks.attachments.store', [$this->project, $task]),
+                        $data
+                    )
+                    ->assertSessionHasErrors('attachment');
+
+                $this->get(route('projects.tasks.show', [$this->project, $task]))
+                    ->assertOk()
+                    ->assertSee('id="attachment-error"', false)
+                    ->assertDontSee('value="not-a-file"', false);
+            }
+        } finally {
+            if (is_file($path)) {
+                unlink($path);
+            }
+        }
+
+        $this->assertDatabaseCount('task_attachments', 0);
+        $this->assertSame([], Storage::disk(TaskAttachment::DISK)->allFiles());
+    }
+
+    public function test_supported_attachment_types_are_accepted(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+
+        $types = [
+            'jpg' => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'webp' => 'image/webp',
+            'pdf' => 'application/pdf',
+            'txt' => 'text/plain',
+            'csv' => 'text/csv',
+        ];
+
+        $this->actingAs($this->admin);
+
+        foreach ($types as $extension => $mimeType) {
+            $this->post(
+                route('projects.tasks.attachments.store', [$this->project, $task]),
+                [
+                    'attachment' => UploadedFile::fake()
+                        ->create('document.'.$extension, 1, $mimeType),
+                ]
+            )->assertSessionHasNoErrors();
+        }
+
+        $this->assertSame(count($types), $task->attachments()->count());
+        $this->assertCount(
+            count($types),
+            Storage::disk(TaskAttachment::DISK)->allFiles()
+        );
+    }
+
+    public function test_attachment_routes_require_current_active_project_access(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+        $attachment = $this->createTaskAttachment($task);
+
+        $downloadUrl = route('projects.tasks.attachments.download', [
+            $this->project,
+            $task,
+            $attachment,
+        ]);
+        $uploadUrl = route('projects.tasks.attachments.store', [$this->project, $task]);
+
+        $this->get($downloadUrl)->assertRedirect(route('login'));
+        $this->post($uploadUrl, [
+            'attachment' => UploadedFile::fake()->createWithContent('notes.txt', 'Notes'),
+        ])->assertRedirect(route('login'));
+
+        $this->actingAs(User::factory()->create())
+            ->get($downloadUrl)
+            ->assertForbidden();
+
+        $this->post($uploadUrl, [
+            'attachment' => UploadedFile::fake()->createWithContent('notes.txt', 'Notes'),
+        ])->assertForbidden();
+
+        $inactive = User::factory()->create(['is_active' => false]);
+        $this->project->members()->attach($inactive);
+
+        $this->actingAs($inactive)
+            ->get($downloadUrl)
+            ->assertRedirect(route('login'));
+
+        $this->actingAs($inactive)
+            ->post($uploadUrl, [
+                'attachment' => UploadedFile::fake()->createWithContent('notes.txt', 'Notes'),
+            ])
+            ->assertRedirect(route('login'));
+
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $this->actingAs($member)->get($downloadUrl)->assertOk();
+
+        $this->project->members()->detach($member);
+
+        $this->get($downloadUrl)->assertForbidden();
+        $this->post($uploadUrl, [
+            'attachment' => UploadedFile::fake()->createWithContent('notes.txt', 'Notes'),
+        ])->assertForbidden();
+
+        $this->assertDatabaseCount('task_attachments', 1);
+        $this->assertCount(1, Storage::disk(TaskAttachment::DISK)->allFiles());
+    }
+
+    public function test_attachments_are_scoped_to_their_task_and_project_and_handle_missing_files(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+        $attachment = $this->createTaskAttachment($task);
+        $otherTask = $this->createTask();
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.attachments.download', [
+                $this->project,
+                $otherTask,
+                $attachment,
+            ]))
+            ->assertNotFound();
+
+        $this->get(route('projects.tasks.attachments.download', [
+            $otherProject,
+            $task,
+            $attachment,
+        ]))->assertNotFound();
+
+        $this->post(
+            route('projects.tasks.attachments.store', [$otherProject, $task]),
+            [
+                'attachment' => UploadedFile::fake()
+                    ->createWithContent('notes.txt', 'Notes'),
+            ]
+        )->assertNotFound();
+
+        Storage::disk(TaskAttachment::DISK)->delete($attachment->path);
+
+        $url = route('projects.tasks.attachments.download', [
+            $this->project,
+            $task,
+            $attachment,
+        ]);
+
+        $this->get($url)->assertNotFound();
+
+        $this->actingAs(User::factory()->create())
+            ->get($url)
+            ->assertForbidden();
+
+        $this->assertDatabaseCount('task_attachments', 1);
+    }
+
+    public function test_attachment_writes_recheck_access_before_storing_files(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+
+        $removed = User::factory()->create();
+        $this->project->members()->attach($removed);
+        $this->project->members()->detach($removed);
+
+        $inactive = User::factory()->create();
+        $this->project->members()->attach($inactive);
+        User::query()->whereKey($inactive->id)->update(['is_active' => false]);
+
+        $demoted = User::factory()->create(['role' => UserRole::Admin]);
+        User::query()->whereKey($demoted->id)->update([
+            'role' => UserRole::Member->value,
+        ]);
+
+        foreach ([$removed, $inactive, $demoted] as $actor) {
+            try {
+                app(TaskManager::class)->addAttachment(
+                    $actor,
+                    $this->project,
+                    $task,
+                    UploadedFile::fake()->createWithContent('notes.txt', 'Notes')
+                );
+
+                $this->fail('Attachment access should be rejected.');
+            } catch (AuthorizationException) {
+                $this->assertDatabaseCount('task_attachments', 0);
+                $this->assertSame([], Storage::disk(TaskAttachment::DISK)->allFiles());
+            }
+        }
+
+        $this->assertDatabaseCount('task_attachments', 0);
+        $this->assertSame([], Storage::disk(TaskAttachment::DISK)->allFiles());
+    }
+
+    public function test_failed_attachment_saves_remove_the_stored_file(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+        $events = TaskAttachment::getEventDispatcher();
+
+        TaskAttachment::setEventDispatcher(clone $events);
+
+        TaskAttachment::creating(function (): void {
+            $this->assertCount(1, Storage::disk(TaskAttachment::DISK)->allFiles());
+
+            throw new \RuntimeException('Simulated attachment save failure.');
+        });
+
+        try {
+            $this->createTaskAttachment($task);
+
+            $this->fail('The attachment save should have failed.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame(
+                'Simulated attachment save failure.',
+                $exception->getMessage()
+            );
+        } finally {
+            TaskAttachment::setEventDispatcher($events);
+        }
+
+        $this->assertDatabaseCount('task_attachments', 0);
+        $this->assertSame([], Storage::disk(TaskAttachment::DISK)->allFiles());
+    }
+
+    public function test_attachment_lists_are_paginated_scoped_and_escaped(): void
+    {
+        Storage::fake(TaskAttachment::DISK);
+
+        $task = $this->createTask();
+        $name = '<img src=x onerror=alert(1)>.txt';
+        $oldest = $this->createTaskAttachment($task, $name);
+
+        for ($number = 1; $number <= 20; $number++) {
+            $this->createTaskAttachment($task, 'notes-'.$number.'.txt');
+        }
+
+        $otherTask = $this->createTask();
+        $this->createTaskAttachment($otherTask, 'other-task-secret.txt');
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSee('attachments_page=2', false)
+            ->assertDontSeeText('other-task-secret.txt')
+            ->assertViewHas(
+                'attachments',
+                fn ($items) => $items->total() === 21
+                    && $items->count() === 20
+                    && $items->getCollection()->every(
+                        fn ($item) => (int) $item->task_id === $task->id
+                    )
+            );
+
+        $this->get(route('projects.tasks.show', [
+            'project' => $this->project,
+            'task' => $task,
+            'attachments_page' => 2,
+        ]))
+            ->assertOk()
+            ->assertSee(e($name), false)
+            ->assertDontSee($name, false)
+            ->assertDontSee($oldest->path, false)
+            ->assertDontSeeText('other-task-secret.txt')
+            ->assertViewHas(
+                'attachments',
+                fn ($items) => $items->currentPage() === 2
+                    && $items->getCollection()->values()->modelKeys() === [$oldest->id]
+            );
+    }
+
+    private function createTaskAttachment(
+        Task $task,
+        string $name = 'notes.txt',
+        string $contents = 'Attachment content.'
+    ): TaskAttachment {
+        return app(TaskManager::class)->addAttachment(
+            $this->admin,
+            $task->project,
+            $task,
+            UploadedFile::fake()->createWithContent($name, $contents)
+        );
     }
 
     private function createAssignedTask(
