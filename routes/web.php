@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\UserController;
 use App\Http\Middleware\EnsureUserIsActive;
 use Illuminate\Support\Facades\Route;
@@ -17,6 +18,8 @@ Route::middleware('guest:web')->group(function () {
 
 Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
     Route::view('/dashboard', 'dashboard')->name('dashboard');
+    Route::resource('projects', ProjectController::class)
+        ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
     Route::resource('users', UserController::class)
         ->only(['index', 'create', 'store', 'edit', 'update']);
 

@@ -8,7 +8,13 @@
                 {{ config('app.name') }}
             </a>
 
-            <div class="flex min-w-0 items-center gap-4">
+            <div class="flex min-w-0 flex-wrap items-center gap-4">
+                @can('viewAny', \App\Models\Project::class)
+                    <a href="{{ route('projects.index') }}" @if (request()->routeIs('projects.*')) aria-current="page" @endif
+                        class="rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                        Projects
+                    </a>
+                @endcan
                 @can('viewAny', \App\Models\User::class)
                     <a href="{{ route('users.index') }}" @if (request()->routeIs('users.*')) aria-current="page" @endif
                         class="rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
