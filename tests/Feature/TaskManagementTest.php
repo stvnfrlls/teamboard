@@ -12,6 +12,7 @@ use App\Models\TaskChecklistItem;
 use App\Models\User;
 use App\Notifications\TaskAssigned;
 use App\Services\TaskManager;
+use App\Services\TaskSummary;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -2802,6 +2803,261 @@ class TaskManagementTest extends TestCase
                 fn ($items) => $items->currentPage() === 2
                     && $items->getCollection()->values()->modelKeys() === [$oldest->id]
             );
+    }
+
+    public function test_project_summaries_count_all_project_tasks_and_follow_utc_boundaries(): void
+    {
+        $this->travelTo(Carbon::parse('2026-10-17 23:59:00', 'UTC'));
+
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $this->createTask(['due_date' => '2026-10-16']);
+        $this->createAssignedTask(User::factory()->create(), [
+            'status' => TaskStatus::InProgress->value,
+            'due_date' => '2026-10-19',
+        ]);
+        $this->createTask([
+            'status' => TaskStatus::InReview->value,
+            'due_date' => '2026-10-17',
+        ]);
+        $this->createTask([
+            'status' => TaskStatus::Done->value,
+            'due_date' => '2026-10-16',
+        ]);
+        $this->createTask([
+            'status' => TaskStatus::Done->value,
+            'due_date' => '2026-10-17',
+        ]);
+        $this->createTask();
+
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+            'key' => 'OTHER',
+        ]);
+
+        $this->createTask([
+            'status' => TaskStatus::Done->value,
+            'due_date' => '2026-10-16',
+        ], $otherProject);
+        $this->createTask(['due_date' => '2026-10-16'], $otherProject);
+
+        $expected = [
+            'total' => 6,
+            'open' => 4,
+            'done' => 2,
+            'overdue' => 1,
+            'due_today' => 1,
+            'completion_percentage' => 33,
+            'status_counts' => [
+                TaskStatus::Todo->value => 2,
+                TaskStatus::InProgress->value => 1,
+                TaskStatus::InReview->value => 1,
+                TaskStatus::Done->value => 2,
+            ],
+        ];
+
+        $this->actingAs($member)
+            ->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertViewHas('taskSummary', $expected)
+            ->assertSeeText('2 of 6 tasks complete')
+            ->assertSeeText('33%');
+
+        $this->travelTo(Carbon::parse('2026-10-18 00:01:00', 'UTC'));
+
+        $this->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertViewHas('taskSummary', array_replace($expected, [
+                'overdue' => 2,
+                'due_today' => 0,
+            ]));
+    }
+
+    public function test_project_progress_handles_empty_complete_and_reopened_tasks(): void
+    {
+        $this->actingAs($this->admin)
+            ->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertSeeText('No tasks yet.')
+            ->assertSee('max="1"', false)
+            ->assertViewHas('taskSummary', [
+                'total' => 0,
+                'open' => 0,
+                'done' => 0,
+                'overdue' => 0,
+                'due_today' => 0,
+                'completion_percentage' => 0,
+                'status_counts' => [
+                    TaskStatus::Todo->value => 0,
+                    TaskStatus::InProgress->value => 0,
+                    TaskStatus::InReview->value => 0,
+                    TaskStatus::Done->value => 0,
+                ],
+            ]);
+
+        $first = $this->createTask(['status' => TaskStatus::Done->value]);
+        $second = $this->createTask();
+        $third = $this->createTask();
+
+        $this->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertViewHas(
+                'taskSummary',
+                fn ($summary) => $summary['total'] === 3
+                    && $summary['done'] === 1
+                    && $summary['completion_percentage'] === 33
+            );
+
+        foreach ([$second, $third] as $index => $task) {
+            app(TaskManager::class)->save(
+                $this->admin,
+                $this->project,
+                $this->editData($task, ['status' => TaskStatus::Done->value]),
+                $task
+            );
+
+            $percentage = $index === 0 ? 66 : 100;
+
+            $this->get(route('projects.show', $this->project))
+                ->assertOk()
+                ->assertViewHas(
+                    'taskSummary',
+                    fn ($summary) => $summary['completion_percentage'] === $percentage
+                        && $summary['done'] === $index + 2
+                );
+        }
+
+        app(TaskManager::class)->save(
+            $this->admin,
+            $this->project,
+            $this->editData($first, ['status' => TaskStatus::Todo->value]),
+            $first
+        );
+
+        $this->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertViewHas(
+                'taskSummary',
+                fn ($summary) => $summary['total'] === 3
+                    && $summary['open'] === 1
+                    && $summary['done'] === 2
+                    && $summary['completion_percentage'] === 66
+            );
+    }
+
+    public function test_project_summary_links_open_matching_task_filters(): void
+    {
+        $this->travelTo(Carbon::parse('2026-10-17 12:00:00', 'UTC'));
+
+        $this->createTask(['due_date' => '2026-10-16']);
+        $this->createTask([
+            'status' => TaskStatus::InReview->value,
+            'due_date' => '2026-10-17',
+        ]);
+        $this->createTask([
+            'status' => TaskStatus::Done->value,
+            'due_date' => '2026-10-16',
+        ]);
+
+        $counts = [
+            TaskStatus::Todo->value => 1,
+            TaskStatus::InProgress->value => 0,
+            TaskStatus::InReview->value => 1,
+            TaskStatus::Done->value => 1,
+        ];
+
+        $response = $this->actingAs($this->admin)
+            ->get(route('projects.show', $this->project))
+            ->assertOk()
+            ->assertSee(route('projects.tasks.index', $this->project), false);
+
+        foreach (TaskStatus::cases() as $status) {
+            $url = route('projects.tasks.index', [
+                'project' => $this->project,
+                'status' => $status->value,
+            ]);
+
+            $response->assertSee($url, false);
+
+            $this->get($url)
+                ->assertOk()
+                ->assertViewHas(
+                    'tasks',
+                    fn ($tasks) => $tasks->total() === $counts[$status->value]
+                        && $tasks->getCollection()->every(
+                            fn ($task) => (int) $task->project_id === $this->project->id
+                                && $task->status === $status
+                        )
+                );
+        }
+
+        foreach (['overdue', 'today'] as $due) {
+            $url = route('projects.tasks.index', [
+                'project' => $this->project,
+                'due' => $due,
+            ]);
+
+            $response->assertSee($url, false);
+
+            $this->get($url)
+                ->assertOk()
+                ->assertViewHas(
+                    'tasks',
+                    fn ($tasks) => $tasks->total() === 1
+                        && $tasks->first()->status !== TaskStatus::Done
+                );
+        }
+    }
+
+    public function test_task_summaries_preserve_query_scope_order_and_selected_fields(): void
+    {
+        $this->travelTo(Carbon::parse('2026-10-17 12:00:00', 'UTC'));
+
+        $member = User::factory()->create();
+
+        $first = $this->createAssignedTask($member, [
+            'title' => 'Owned open task',
+            'due_date' => '2026-10-16',
+        ]);
+        $second = $this->createAssignedTask($member, [
+            'title' => 'Owned completed task',
+            'status' => TaskStatus::Done->value,
+            'due_date' => '2026-10-16',
+        ]);
+
+        $this->createTask(['due_date' => '2026-10-16']);
+
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+            'key' => 'OTHER',
+        ]);
+        $this->createAssignedTask($member, [
+            'due_date' => '2026-10-16',
+        ], $otherProject);
+
+        $query = Task::query()
+            ->visibleTo($member)
+            ->assignedTo($member)
+            ->where('tasks.project_id', $this->project->id)
+            ->orderByDesc('tasks.number');
+
+        $summary = app(TaskSummary::class)->for($query);
+
+        $this->assertSame(2, $summary['total']);
+        $this->assertSame(1, $summary['open']);
+        $this->assertSame(1, $summary['done']);
+        $this->assertSame(1, $summary['overdue']);
+        $this->assertSame(0, $summary['due_today']);
+        $this->assertSame(50, $summary['completion_percentage']);
+
+        $listed = $query->get();
+
+        $this->assertSame([$second->id, $first->id], $listed->modelKeys());
+        $this->assertSame([
+            'Owned completed task',
+            'Owned open task',
+        ], $listed->pluck('title')->all());
     }
 
     private function createTaskAttachment(

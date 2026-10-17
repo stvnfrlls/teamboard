@@ -19,8 +19,12 @@
         </div>
     </div>
 
+    <x-tasks.summary :summary="$taskSummary" task-route="projects.tasks.index" :route-parameters="['project' => $project]" class="mb-6" />
+
+
     <div class="grid gap-6 lg:grid-cols-3">
-        <section aria-labelledby="details-heading" class="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-2">
+        <section aria-labelledby="details-heading"
+            class="rounded-xl border border-slate-200 bg-white p-6 lg:col-span-2">
             <span class="rounded-md bg-indigo-50 px-2.5 py-1 font-mono text-xs font-semibold text-indigo-700">
                 {{ $project->key }}
             </span>

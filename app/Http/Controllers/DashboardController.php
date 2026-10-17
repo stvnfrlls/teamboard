@@ -5,12 +5,14 @@ namespace App\Http\Controllers;
 use App\Enums\TaskStatus;
 use App\Models\Project;
 use App\Models\Task;
+use App\Services\TaskSummary;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\View\View;
 
 class DashboardController extends Controller
 {
-    public function __invoke(Request $request): View
+    public function __invoke(Request $request, TaskSummary $summaries): View
     {
         $actor = $request->user('web');
 
@@ -18,27 +20,16 @@ class DashboardController extends Controller
             ->visibleTo($actor)
             ->assignedTo($actor);
 
-        $totals = (clone $assigned)
-            ->select('status')
-            ->selectRaw('COUNT(*) as total')
-            ->groupBy('status')
-            ->pluck('total', 'status');
+        $taskSummary = $summaries->for($assigned);
 
-        $statusCounts = [];
+        $summary = Arr::only($taskSummary, [
+            'open',
+            'done',
+            'overdue',
+            'due_today',
+        ]);
 
-        foreach (TaskStatus::cases() as $status) {
-            $statusCounts[$status->value] = (int) ($totals[$status->value] ?? 0);
-        }
-
-        $done = $statusCounts[TaskStatus::Done->value];
-
-        $summary = [
-            'open' => array_sum($statusCounts) - $done,
-            'done' => $done,
-            'overdue' => (clone $assigned)->overdue()->count(),
-            'due_today' => (clone $assigned)->dueToday()->count(),
-            'projects' => Project::query()->visibleTo($actor)->count(),
-        ];
+        $summary['projects'] = Project::query()->visibleTo($actor)->count();
 
         $tasks = (clone $assigned)
             ->open()
@@ -52,7 +43,7 @@ class DashboardController extends Controller
 
         return view('dashboard', [
             'summary' => $summary,
-            'statusCounts' => $statusCounts,
+            'statusCounts' => $taskSummary['status_counts'],
             'taskStatuses' => TaskStatus::cases(),
             'tasks' => $tasks,
         ]);

@@ -6,6 +6,7 @@ use App\Http\Requests\SaveProjectRequest;
 use App\Models\Project;
 use App\Models\User;
 use App\Services\ProjectManager;
+use App\Services\TaskSummary;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -61,7 +62,7 @@ class ProjectController extends Controller
             ->with('status', 'Project created.');
     }
 
-    public function show(Project $project): View
+    public function show(Project $project, TaskSummary $summaries): View
     {
         Gate::authorize('view', $project);
 
@@ -70,7 +71,9 @@ class ProjectController extends Controller
             'members:id,name,email,is_active',
         ]);
 
-        return view('projects.show', compact('project'));
+        $taskSummary = $summaries->for($project->tasks()->getQuery());
+
+        return view('projects.show', compact('project', 'taskSummary'));
     }
 
     public function edit(Project $project): View
