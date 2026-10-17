@@ -596,6 +596,271 @@ class TaskManagementTest extends TestCase
         $this->assertDatabaseCount('tasks', 0);
     }
 
+    public function test_status_changes_preserve_other_fields_and_existing_assignment(): void
+    {
+        $assignee = User::factory()->create();
+        $this->project->members()->attach($assignee);
+
+        $task = $this->createTask([
+            'title' => 'Keep this title',
+            'description' => 'Keep this description',
+            'priority' => TaskPriority::High->value,
+            'assignee_id' => $assignee->id,
+            'due_date' => '2026-12-01',
+        ]);
+
+        $assignee->update(['is_active' => false]);
+
+        $this->actingAs($this->admin)
+            ->patchJson(
+                route('projects.tasks.status', [$this->project, $task]),
+                [
+                    'status' => TaskStatus::Done->value,
+                    'lock_version' => 0,
+                    'title' => 'Unexpected replacement',
+                    'assignee_id' => null,
+                    'due_date' => null,
+                ]
+            )
+            ->assertOk()
+            ->assertJsonPath('task.status', TaskStatus::Done->value)
+            ->assertJsonPath('task.lock_version', 1);
+
+        $task->refresh();
+
+        $this->assertSame('Keep this title', $task->title);
+        $this->assertSame('Keep this description', $task->description);
+        $this->assertSame(TaskPriority::High, $task->priority);
+        $this->assertSame($assignee->id, $task->assignee_id);
+        $this->assertSame('2026-12-01', $task->due_date->format('Y-m-d'));
+        $this->assertNotNull($task->completed_at);
+    }
+
+    public function test_stale_status_changes_are_rejected(): void
+    {
+        $task = $this->createTask();
+        $url = route('projects.tasks.status', [$this->project, $task]);
+
+        $this->actingAs($this->admin)
+            ->patchJson($url, [
+                'status' => TaskStatus::InReview->value,
+                'lock_version' => 0,
+            ])
+            ->assertOk();
+
+        $this->patchJson($url, [
+            'status' => TaskStatus::Done->value,
+            'lock_version' => 0,
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('lock_version');
+
+        $task->refresh();
+
+        $this->assertSame(TaskStatus::InReview, $task->status);
+        $this->assertSame(1, $task->lock_version);
+        $this->assertNull($task->completed_at);
+    }
+
+    public function test_status_changes_require_project_access_and_correct_project_binding(): void
+    {
+        $task = $this->createTask();
+        $url = route('projects.tasks.status', [$this->project, $task]);
+        $data = [
+            'status' => TaskStatus::InProgress->value,
+            'lock_version' => 0,
+        ];
+
+        $this->patchJson($url, $data)->assertUnauthorized();
+
+        $member = User::factory()->create();
+
+        $this->actingAs($member)
+            ->patchJson($url, $data)
+            ->assertForbidden();
+
+        $this->project->members()->attach($member);
+
+        $this->patchJson($url, $data)->assertOk();
+
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->actingAs($this->admin)
+            ->patchJson(
+                route('projects.tasks.status', [$otherProject, $task]),
+                [
+                    'status' => TaskStatus::Done->value,
+                    'lock_version' => 1,
+                ]
+            )
+            ->assertNotFound();
+
+        $this->assertSame(TaskStatus::InProgress, $task->fresh()->status);
+    }
+
+    public function test_status_changes_validate_status_and_revision(): void
+    {
+        $task = $this->createTask();
+        $url = route('projects.tasks.status', [$this->project, $task]);
+
+        $this->actingAs($this->admin);
+
+        foreach (['invalid', ['done']] as $status) {
+            $this->patchJson($url, [
+                'status' => $status,
+                'lock_version' => 0,
+            ])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors('status');
+        }
+
+        $this->patchJson($url, [
+            'status' => TaskStatus::Done->value,
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('lock_version');
+
+        $this->assertSame(TaskStatus::Todo, $task->fresh()->status);
+        $this->assertSame(0, $task->fresh()->lock_version);
+    }
+
+    public function test_board_columns_have_independent_pagination(): void
+    {
+        $done = $this->createTask([
+            'title' => 'Completed board task',
+            'status' => TaskStatus::Done->value,
+        ]);
+
+        $firstTodo = null;
+
+        for ($number = 0; $number < 21; $number++) {
+            $task = $this->createTask([
+                'title' => 'Board todo '.$number,
+            ]);
+
+            $firstTodo ??= $task;
+        }
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.index', [
+                'project' => $this->project,
+                'view' => 'board',
+            ]))
+            ->assertOk()
+            ->assertSeeText($done->title)
+            ->assertDontSeeText($firstTodo->title)
+            ->assertViewHas('columns', function (array $columns): bool {
+                return $columns['todo']['tasks']->total() === 21
+                    && $columns['todo']['tasks']->count() === 20
+                    && $columns['done']['tasks']->total() === 1
+                    && $columns['done']['tasks']->count() === 1;
+            });
+
+        $this->get(route('projects.tasks.index', [
+            'project' => $this->project,
+            'view' => 'board',
+            'todo_page' => 2,
+        ]))
+            ->assertOk()
+            ->assertSeeText($firstTodo->title)
+            ->assertSeeText($done->title)
+            ->assertViewHas('columns', function (array $columns): bool {
+                return $columns['todo']['tasks']->currentPage() === 2
+                    && $columns['todo']['tasks']->count() === 1
+                    && $columns['done']['tasks']->currentPage() === 1
+                    && $columns['done']['tasks']->count() === 1;
+            });
+    }
+
+    public function test_board_filters_keep_results_inside_the_project(): void
+    {
+        $matching = $this->createTask([
+            'title' => 'Board needle match',
+            'priority' => TaskPriority::High->value,
+        ]);
+
+        $this->createTask([
+            'title' => 'Board needle wrong priority',
+            'priority' => TaskPriority::Low->value,
+        ]);
+
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->createTask([
+            'title' => 'Board needle other project',
+            'priority' => TaskPriority::High->value,
+        ], $otherProject);
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.index', [
+                'project' => $this->project,
+                'view' => 'board',
+                'search' => 'needle',
+                'priority' => TaskPriority::High->value,
+            ]))
+            ->assertOk()
+            ->assertSeeText($matching->title)
+            ->assertDontSeeText('Board needle wrong priority')
+            ->assertDontSeeText('Board needle other project')
+            ->assertViewHas('columns', function (array $columns): bool {
+                $total = array_sum(array_map(
+                    fn (array $column) => $column['tasks']->total(),
+                    $columns
+                ));
+
+                return $total === 1;
+            });
+    }
+
+    public function test_board_requires_project_access(): void
+    {
+        $url = route('projects.tasks.index', [
+            'project' => $this->project,
+            'view' => 'board',
+        ]);
+
+        $this->get($url)->assertRedirect(route('login'));
+
+        $member = User::factory()->create();
+
+        $this->actingAs($member)->get($url)->assertForbidden();
+
+        $this->project->members()->attach($member);
+
+        $this->get($url)
+            ->assertOk()
+            ->assertViewHas('viewMode', 'board');
+    }
+
+    public function test_status_menu_works_without_javascript(): void
+    {
+        $task = $this->createTask();
+
+        $this->actingAs($this->admin)
+            ->patch(
+                route('projects.tasks.status', [$this->project, $task]),
+                [
+                    'status' => TaskStatus::Done->value,
+                    'lock_version' => 0,
+                ]
+            )
+            ->assertRedirect(route('projects.tasks.index', [
+                'project' => $this->project,
+                'view' => 'board',
+            ]))
+            ->assertSessionHas('status', 'Task status updated.');
+
+        $task->refresh();
+
+        $this->assertSame(TaskStatus::Done, $task->status);
+        $this->assertSame(1, $task->lock_version);
+        $this->assertNotNull($task->completed_at);
+    }
+
     private function createTask(
         array $overrides = [],
         ?Project $project = null,

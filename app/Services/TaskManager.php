@@ -20,6 +20,7 @@ class TaskManager
         ?Task $task = null
     ): Task {
         return DB::transaction(function () use ($actor, $project, $data, $task) {
+            $changesAssignee = array_key_exists('assignee_id', $data);
             $assigneeId = isset($data['assignee_id'])
                 ? (int) $data['assignee_id']
                 : null;
@@ -65,7 +66,7 @@ class TaskManager
                 ]);
             }
 
-            if ($assigneeId !== null) {
+            if ($changesAssignee && $assigneeId !== null) {
                 $assignable = $lockedUsers->has($assigneeId)
                     && $project->assignableMembers()
                         ->whereKey($assigneeId)
@@ -97,7 +98,9 @@ class TaskManager
                 'due_date',
             ]));
 
-            $task->assignee_id = $assigneeId;
+            if ($changesAssignee) {
+                $task->assignee_id = $assigneeId;
+            }
 
             $task->completed_at = $task->status === TaskStatus::Done
                 ? ($task->completed_at ?? now())

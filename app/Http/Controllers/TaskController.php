@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Enums\TaskPriority;
 use App\Enums\TaskStatus;
 use App\Http\Requests\SaveTaskRequest;
+use App\Http\Requests\UpdateTaskStatusRequest;
 use App\Models\Project;
 use App\Models\Task;
 use App\Services\TaskManager;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
@@ -26,6 +28,7 @@ class TaskController extends Controller
             'search' => ['nullable', 'string', 'max:100'],
             'status' => ['nullable', Rule::enum(TaskStatus::class)],
             'priority' => ['nullable', Rule::enum(TaskPriority::class)],
+            'view' => ['nullable', Rule::in(['list', 'board'])],
         ]);
 
         $search = trim($filters['search'] ?? '');
@@ -35,7 +38,7 @@ class TaskController extends Controller
             ? Str::after(Str::upper($search), $project->key.'-')
             : $search;
 
-        $tasks = $project->tasks()
+        $query = $project->tasks()->getQuery()
             ->when($search !== '', function (Builder $query) use ($search, $number) {
                 $query->where(function (Builder $query) use ($search, $number) {
                     $query->where('title', 'like', '%'.$search.'%');
@@ -55,9 +58,25 @@ class TaskController extends Controller
                 'project:id,key',
                 'assignee:id,name,is_active',
             ])
-            ->orderByDesc('number')
-            ->paginate(20)
-            ->withQueryString();
+            ->orderByDesc('number');
+
+        $viewMode = $filters['view'] ?? 'list';
+        $tasks = null;
+        $columns = [];
+
+        if ($viewMode === 'board') {
+            foreach (TaskStatus::cases() as $status) {
+                $columns[$status->value] = [
+                    'status' => $status,
+                    'tasks' => (clone $query)
+                        ->where('status', $status->value)
+                        ->paginate(20, ['*'], $status->value.'_page')
+                        ->withQueryString(),
+                ];
+            }
+        } else {
+            $tasks = $query->paginate(20)->withQueryString();
+        }
 
         return view('tasks.index', [
             'project' => $project,
@@ -65,6 +84,8 @@ class TaskController extends Controller
             'filters' => $filters,
             'statuses' => $this->options(TaskStatus::cases()),
             'priorities' => $this->options(TaskPriority::cases()),
+            'viewMode' => $viewMode,
+            'columns' => $columns,
         ]);
     }
 
@@ -131,6 +152,36 @@ class TaskController extends Controller
 
         return redirect()->route('projects.tasks.show', [$project, $task])
             ->with('status', 'Task updated.');
+    }
+
+    public function updateStatus(
+        UpdateTaskStatusRequest $request,
+        Project $project,
+        Task $task,
+        TaskManager $tasks
+    ): JsonResponse|RedirectResponse {
+        $task = $tasks->save(
+            $request->user('web'),
+            $project,
+            $request->validated(),
+            $task
+        );
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'message' => 'Task status updated.',
+                'task' => [
+                    'id' => $task->getKey(),
+                    'status' => $task->status->value,
+                    'lock_version' => $task->lock_version,
+                ],
+            ]);
+        }
+
+        return redirect()->route('projects.tasks.index', [
+            'project' => $project,
+            'view' => 'board',
+        ])->with('status', 'Task status updated.');
     }
 
     protected function form(Project $project, Task $task): View

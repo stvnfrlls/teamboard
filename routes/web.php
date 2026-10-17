@@ -26,6 +26,10 @@ Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
     Route::scopeBindings()->group(function () {
         Route::resource('projects.tasks', TaskController::class)
             ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
+        Route::patch(
+            'projects/{project}/tasks/{task}/status',
+            [TaskController::class, 'updateStatus']
+        )->name('projects.tasks.status');
     });
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
