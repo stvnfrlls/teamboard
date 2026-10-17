@@ -6,7 +6,7 @@
     </label>
 
     <input id="{{ $name }}" name="{{ $name }}" type="{{ $type }}"
-        @if ($type !== 'password') value="{{ old($name, $value) }}" @endif
+        @if ($type !== 'password') value="{{ is_scalar(old($name, $value)) ? old($name, $value) : '' }}" @endif
         @if ($errors->has($name)) aria-invalid="true"
             aria-describedby="{{ $name }}-error" @endif
         {{ $attributes->class([
