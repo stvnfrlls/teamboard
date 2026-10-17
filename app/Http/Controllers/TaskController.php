@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Enums\TaskPriority;
 use App\Enums\TaskStatus;
+use App\Http\Requests\ListTasksRequest;
 use App\Http\Requests\SaveTaskRequest;
 use App\Http\Requests\UpdateTaskStatusRequest;
 use App\Models\Project;
@@ -12,50 +13,22 @@ use App\Services\TaskManager;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Support\Str;
-use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 
 class TaskController extends Controller
 {
-    public function index(Request $request, Project $project): View
+    public function index(ListTasksRequest $request, Project $project): View
     {
         Gate::authorize('viewAny', [Task::class, $project]);
 
-        $filters = $request->validate([
-            'search' => ['nullable', 'string', 'max:100'],
-            'status' => ['nullable', Rule::enum(TaskStatus::class)],
-            'priority' => ['nullable', Rule::enum(TaskPriority::class)],
-            'view' => ['nullable', Rule::in(['list', 'board'])],
-        ]);
-
-        $search = trim($filters['search'] ?? '');
-        $filters['search'] = $search;
-
-        $number = Str::startsWith(Str::upper($search), $project->key.'-')
-            ? Str::after(Str::upper($search), $project->key.'-')
-            : $search;
+        $filters = $request->validated();
+        $filters['search'] = trim($filters['search'] ?? '');
 
         $query = $project->tasks()->getQuery()
-            ->when($search !== '', function (Builder $query) use ($search, $number) {
-                $query->where(function (Builder $query) use ($search, $number) {
-                    $query->where('title', 'like', '%'.$search.'%');
-
-                    if (ctype_digit($number)) {
-                        $query->orWhere('number', $number);
-                    }
-                });
-            })
-            ->when($filters['status'] ?? null, function (Builder $query, $status) {
-                $query->where('status', $status);
-            })
-            ->when($filters['priority'] ?? null, function (Builder $query, $priority) {
-                $query->where('priority', $priority);
-            })
+            ->matchingFilters($filters)
             ->with([
-                'project:id,key',
+                'project:id,key,name',
                 'assignee:id,name,is_active',
             ])
             ->orderByDesc('number');
@@ -86,6 +59,32 @@ class TaskController extends Controller
             'priorities' => $this->options(TaskPriority::cases()),
             'viewMode' => $viewMode,
             'columns' => $columns,
+        ]);
+    }
+
+    public function mine(ListTasksRequest $request): View
+    {
+        $actor = $request->user('web');
+        $filters = $request->validated();
+        $filters['search'] = trim($filters['search'] ?? '');
+
+        $tasks = Task::query()
+            ->visibleTo($actor)
+            ->assignedTo($actor)
+            ->matchingFilters($filters)
+            ->with([
+                'project:id,key,name',
+                'assignee:id,name,is_active',
+            ])
+            ->byDueDate()
+            ->paginate(20)
+            ->withQueryString();
+
+        return view('tasks.mine', [
+            'tasks' => $tasks,
+            'filters' => $filters,
+            'statuses' => $this->options(TaskStatus::cases()),
+            'priorities' => $this->options(TaskPriority::cases()),
         ]);
     }
 

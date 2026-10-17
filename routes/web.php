@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\TaskChecklistItemController;
 use App\Http\Controllers\TaskCommentController;
@@ -20,7 +21,8 @@ Route::middleware('guest:web')->group(function () {
 });
 
 Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
-    Route::view('/dashboard', 'dashboard')->name('dashboard');
+    Route::get('/dashboard', DashboardController::class)->name('dashboard');
+    Route::get('/my-tasks', [TaskController::class, 'mine'])->name('tasks.mine');
     Route::resource('projects', ProjectController::class)
         ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
     Route::resource('users', UserController::class)

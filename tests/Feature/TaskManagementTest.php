@@ -11,6 +11,7 @@ use App\Models\TaskChecklistItem;
 use App\Models\User;
 use App\Services\TaskManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 
 class TaskManagementTest extends TestCase
@@ -1368,6 +1369,379 @@ class TaskManagementTest extends TestCase
             ->assertViewHas('comments', function ($comments): bool {
                 return $comments->currentPage() === 1 && $comments->count() === 1;
             });
+    }
+
+    public function test_personal_pages_only_include_accessible_assignments(): void
+    {
+        $member = User::factory()->create();
+        $otherUser = User::factory()->create();
+
+        $own = $this->createAssignedTask($member, ['title' => 'Visible assignment']);
+        $this->createAssignedTask($otherUser, ['title' => 'Someone else assignment']);
+        $this->createTask(['title' => 'Unassigned task']);
+
+        $secondProject = Project::factory()->create([
+            'key' => 'SECOND',
+            'created_by' => $this->admin->id,
+        ]);
+
+        $second = $this->createAssignedTask(
+            $member,
+            ['title' => 'Second project assignment'],
+            $secondProject
+        );
+
+        $lostProject = Project::factory()->create([
+            'key' => 'LOST',
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->createAssignedTask(
+            $member,
+            ['title' => 'Assignment after access removed'],
+            $lostProject
+        );
+
+        $lostProject->members()->detach($member);
+
+        $this->actingAs($member)
+            ->get(route('tasks.mine'))
+            ->assertOk()
+            ->assertSeeText($own->title)
+            ->assertSeeText($second->title)
+            ->assertDontSeeText('Someone else assignment')
+            ->assertDontSeeText('Unassigned task')
+            ->assertDontSeeText('Assignment after access removed')
+            ->assertSee(route('projects.tasks.show', [$secondProject, $second]), false)
+            ->assertViewHas('tasks', fn ($tasks) => $tasks->total() === 2);
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertDontSeeText('Someone else assignment')
+            ->assertDontSeeText('Assignment after access removed')
+            ->assertViewHas(
+                'summary',
+                fn (array $summary) => $summary['open'] === 2 && $summary['projects'] === 2
+            );
+    }
+
+    public function test_admin_personal_pages_only_show_their_own_assignments(): void
+    {
+        $own = $this->createAssignedTask($this->admin, ['title' => 'Admin assignment']);
+
+        $this->createAssignedTask(
+            User::factory()->create(),
+            ['title' => 'Member assignment']
+        );
+
+        $this->project->members()->detach($this->admin);
+
+        $this->actingAs($this->admin)
+            ->get(route('tasks.mine'))
+            ->assertOk()
+            ->assertSeeText($own->title)
+            ->assertDontSeeText('Member assignment')
+            ->assertViewHas('tasks', fn ($tasks) => $tasks->total() === 1);
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertSeeText($own->title)
+            ->assertDontSeeText('Member assignment')
+            ->assertViewHas('summary', fn (array $summary) => $summary['open'] === 1);
+    }
+
+    public function test_dashboard_counts_and_deadline_filters_follow_utc_date_boundaries(): void
+    {
+        $this->travelTo(Carbon::parse('2026-10-17 23:59:00', 'UTC'));
+
+        $member = User::factory()->create();
+
+        $overdue = $this->createAssignedTask($member, [
+            'due_date' => '2026-10-16',
+        ]);
+
+        $today = $this->createAssignedTask($member, [
+            'status' => TaskStatus::InProgress->value,
+            'due_date' => '2026-10-17',
+        ]);
+
+        $this->createAssignedTask($member, [
+            'status' => TaskStatus::InReview->value,
+            'due_date' => '2026-10-18',
+        ]);
+
+        $this->createAssignedTask($member);
+
+        foreach (['2026-10-16', '2026-10-17'] as $date) {
+            $this->createAssignedTask($member, [
+                'status' => TaskStatus::Done->value,
+                'due_date' => $date,
+            ]);
+        }
+
+        for ($number = 0; $number < 3; $number++) {
+            $this->createAssignedTask($member, ['due_date' => '2026-10-20']);
+        }
+
+        $this->actingAs($member)
+            ->get(route('dashboard'))
+            ->assertOk()
+            ->assertViewHas('summary', [
+                'open' => 7,
+                'done' => 2,
+                'overdue' => 1,
+                'due_today' => 1,
+                'projects' => 1,
+            ])
+            ->assertViewHas('statusCounts', [
+                TaskStatus::Todo->value => 5,
+                TaskStatus::InProgress->value => 1,
+                TaskStatus::InReview->value => 1,
+                TaskStatus::Done->value => 2,
+            ])
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->count() === 5
+                    && $tasks->every(fn (Task $task) => $task->status !== TaskStatus::Done)
+            );
+
+        $this->get(route('tasks.mine', ['due' => 'overdue']))
+            ->assertOk()
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->getCollection()->modelKeys() === [$overdue->id]
+            );
+
+        $this->get(route('tasks.mine', ['due' => 'today']))
+            ->assertOk()
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->getCollection()->modelKeys() === [$today->id]
+            );
+
+        $this->travel(2)->minutes();
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertViewHas(
+                'summary',
+                fn (array $summary) => $summary['overdue'] === 2
+                    && $summary['due_today'] === 1
+                    && $summary['done'] === 2
+            );
+    }
+
+    public function test_personal_tasks_are_ordered_by_due_date_with_undated_tasks_last(): void
+    {
+        $member = User::factory()->create();
+
+        $undated = $this->createAssignedTask($member);
+        $late = $this->createAssignedTask($member, ['due_date' => '2026-10-20']);
+        $early = $this->createAssignedTask($member, ['due_date' => '2026-10-16']);
+        $sameDateOlder = $this->createAssignedTask($member, ['due_date' => '2026-10-17']);
+        $sameDateNewer = $this->createAssignedTask($member, ['due_date' => '2026-10-17']);
+        $middle = $this->createAssignedTask($member, ['due_date' => '2026-10-19']);
+
+        $expected = [
+            $early->id,
+            $sameDateNewer->id,
+            $sameDateOlder->id,
+            $middle->id,
+            $late->id,
+            $undated->id,
+        ];
+
+        $this->actingAs($member)
+            ->get(route('tasks.mine'))
+            ->assertOk()
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->getCollection()->modelKeys() === $expected
+            );
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->modelKeys() === array_slice($expected, 0, 5)
+            );
+    }
+
+    public function test_my_tasks_filters_and_references_work_across_projects(): void
+    {
+        $member = User::factory()->create();
+
+        $matching = $this->createAssignedTask($member, [
+            'title' => 'Needle matching task',
+            'status' => TaskStatus::InReview->value,
+            'priority' => TaskPriority::High->value,
+        ]);
+
+        $this->createAssignedTask($member, [
+            'title' => 'Needle wrong status',
+            'priority' => TaskPriority::High->value,
+        ]);
+
+        $this->createAssignedTask($member, [
+            'title' => 'Needle wrong priority',
+            'status' => TaskStatus::InReview->value,
+            'priority' => TaskPriority::Low->value,
+        ]);
+
+        $otherProject = Project::factory()->create([
+            'key' => 'OTHER',
+            'created_by' => $this->admin->id,
+        ]);
+
+        $other = $this->createAssignedTask(
+            $member,
+            ['title' => 'Separate project reference'],
+            $otherProject
+        );
+
+        $this->actingAs($member)
+            ->get(route('tasks.mine', [
+                'search' => 'Needle',
+                'status' => TaskStatus::InReview->value,
+                'priority' => TaskPriority::High->value,
+            ]))
+            ->assertOk()
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->getCollection()->modelKeys() === [$matching->id]
+            );
+
+        foreach ([$matching, $other] as $task) {
+            $this->get(route('tasks.mine', [
+                'search' => strtolower($task->reference),
+            ]))
+                ->assertOk()
+                ->assertViewHas(
+                    'tasks',
+                    fn ($tasks) => $tasks->getCollection()->modelKeys() === [$task->id]
+                );
+        }
+    }
+
+    public function test_personal_and_project_lists_render_pagination_links(): void
+    {
+        $member = User::factory()->create();
+        $oldest = null;
+
+        for ($number = 1; $number <= 21; $number++) {
+            $task = $this->createAssignedTask($member, [
+                'title' => sprintf('Paged task [%02d]', $number),
+            ]);
+
+            $oldest ??= $task;
+        }
+
+        $this->actingAs($member);
+
+        $routes = [
+            ['tasks.mine', []],
+            ['projects.tasks.index', ['project' => $this->project]],
+        ];
+
+        foreach ($routes as [$name, $parameters]) {
+            $this->get(route($name, array_merge($parameters, ['search' => 'Paged'])))
+                ->assertOk()
+                ->assertSee('page=2', false)
+                ->assertDontSeeText($oldest->title)
+                ->assertViewHas(
+                    'tasks',
+                    fn ($tasks) => $tasks->total() === 21
+                        && $tasks->count() === 20
+                        && str_contains($tasks->nextPageUrl(), 'search=Paged')
+                );
+
+            $this->get(route($name, array_merge($parameters, [
+                'search' => 'Paged',
+                'page' => 2,
+            ])))
+                ->assertOk()
+                ->assertSeeText($oldest->title)
+                ->assertViewHas('tasks', fn ($tasks) => $tasks->count() === 1);
+        }
+    }
+
+    public function test_shared_task_filters_reject_invalid_inputs(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $this->actingAs($member);
+
+        $urls = [
+            route('tasks.mine'),
+            route('projects.tasks.index', $this->project),
+        ];
+
+        $cases = [
+            ['search', ['invalid']],
+            ['search', str_repeat('a', 101)],
+            ['status', 'invalid'],
+            ['priority', 'invalid'],
+            ['due', ['overdue']],
+            ['due', 'invalid'],
+            ['view', 'invalid'],
+        ];
+
+        foreach ($urls as $url) {
+            foreach ($cases as [$field, $value]) {
+                $this->getJson($url.'?'.http_build_query([$field => $value]))
+                    ->assertUnprocessable()
+                    ->assertJsonValidationErrors($field);
+            }
+        }
+    }
+
+    public function test_personal_pages_require_active_login_and_handle_empty_assignments(): void
+    {
+        foreach (['dashboard', 'tasks.mine'] as $name) {
+            $this->get(route($name))->assertRedirect(route('login'));
+        }
+
+        $inactive = User::factory()->create(['is_active' => false]);
+
+        foreach (['dashboard', 'tasks.mine'] as $name) {
+            $this->actingAs($inactive)
+                ->get(route($name))
+                ->assertRedirect(route('login'));
+        }
+
+        $member = User::factory()->create();
+
+        $this->actingAs($member)
+            ->get(route('tasks.mine'))
+            ->assertOk()
+            ->assertViewHas('tasks', fn ($tasks) => $tasks->total() === 0);
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertSeeText('No open tasks assigned to you.')
+            ->assertViewHas('summary', [
+                'open' => 0,
+                'done' => 0,
+                'overdue' => 0,
+                'due_today' => 0,
+                'projects' => 0,
+            ])
+            ->assertViewHas('tasks', fn ($tasks) => $tasks->isEmpty());
+    }
+
+    private function createAssignedTask(
+        User $assignee,
+        array $overrides = [],
+        ?Project $project = null
+    ): Task {
+        $project ??= $this->project;
+        $project->members()->syncWithoutDetaching([$assignee->id]);
+
+        return $this->createTask(
+            array_replace($overrides, ['assignee_id' => $assignee->id]),
+            $project
+        );
     }
 
     private function createChecklistItem(
