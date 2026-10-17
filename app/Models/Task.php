@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Task extends Model
 {
@@ -36,6 +37,11 @@ class Task extends Model
             'completed_at' => 'datetime',
             'lock_version' => 'integer',
         ];
+    }
+
+    public function comments(): HasMany
+    {
+        return $this->hasMany(TaskComment::class);
     }
 
     public function project(): BelongsTo

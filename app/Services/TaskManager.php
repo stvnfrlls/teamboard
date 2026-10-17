@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\TaskStatus;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\TaskComment;
 use App\Models\User;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -110,6 +111,43 @@ class TaskManager
             $task->setRelation('project', $project);
 
             return $task;
+        }, 3);
+    }
+
+    public function addComment(
+        User $actor,
+        Project $project,
+        Task $task,
+        string $body
+    ): TaskComment {
+        return DB::transaction(function () use ($actor, $project, $task, $body) {
+            $actor = User::query()
+                ->whereKey($actor->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            abort_unless($actor, 403);
+
+            $project = Project::query()
+                ->whereKey($project->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $task = $project->tasks()
+                ->whereKey($task->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            Gate::forUser($actor)->authorize('comment', $task);
+
+            $comment = $task->comments()->make([
+                'body' => $body,
+            ]);
+
+            $comment->author()->associate($actor);
+            $comment->save();
+
+            return $comment;
         }, 3);
     }
 }

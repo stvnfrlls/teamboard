@@ -80,4 +80,5 @@
             </dl>
         </section>
     </div>
+    @include('tasks.comments')
 </x-layouts.app>

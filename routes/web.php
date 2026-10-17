@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\TaskCommentController;
 use App\Http\Controllers\TaskController;
 use App\Http\Controllers\UserController;
 use App\Http\Middleware\EnsureUserIsActive;
@@ -30,6 +31,10 @@ Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
             'projects/{project}/tasks/{task}/status',
             [TaskController::class, 'updateStatus']
         )->name('projects.tasks.status');
+        Route::post(
+            'projects/{project}/tasks/{task}/comments',
+            [TaskCommentController::class, 'store']
+        )->name('projects.tasks.comments.store');
     });
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])

@@ -30,4 +30,9 @@ class TaskPolicy
     {
         return $this->view($user, $task);
     }
+
+    public function comment(User $user, Task $task): bool
+    {
+        return $this->view($user, $task);
+    }
 }

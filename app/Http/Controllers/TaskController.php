@@ -125,7 +125,14 @@ class TaskController extends Controller
             'creator:id,name',
         ]);
 
-        return view('tasks.show', compact('project', 'task'));
+        $comments = $task->comments()
+            ->with('author:id,name')
+            ->orderByDesc('id')
+            ->paginate(20, ['*'], 'comments_page')
+            ->withQueryString()
+            ->fragment('comments');
+
+        return view('tasks.show', compact('project', 'task', 'comments'));
     }
 
     public function edit(Project $project, Task $task): View

@@ -861,6 +861,223 @@ class TaskManagementTest extends TestCase
         $this->assertNotNull($task->completed_at);
     }
 
+    public function test_members_can_comment_without_changing_the_task_or_forging_authorship(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $task = $this->createTask();
+        $otherTask = $this->createTask();
+        $updatedAt = $task->getRawOriginal('updated_at');
+        $version = $task->lock_version;
+
+        $this->travel(1)->minutes();
+
+        $this->actingAs($member)
+            ->post(
+                route('projects.tasks.comments.store', [$this->project, $task]),
+                [
+                    'body' => "  First line\nSecond line  ",
+                    'author_id' => $this->admin->id,
+                    'task_id' => $otherTask->id,
+                    'created_at' => '2000-01-01 00:00:00',
+                ]
+            )
+            ->assertSessionHasNoErrors()
+            ->assertRedirect(
+                route('projects.tasks.show', [$this->project, $task]).'#comments'
+            )
+            ->assertSessionHas('status', 'Comment added.');
+
+        $comment = $task->comments()->sole();
+
+        $this->assertSame($member->id, $comment->author_id);
+        $this->assertSame($task->id, $comment->task_id);
+        $this->assertSame("First line\nSecond line", $comment->body);
+        $this->assertNotSame('2000-01-01 00:00:00', $comment->getRawOriginal('created_at'));
+        $this->assertSame(0, $otherTask->comments()->count());
+
+        $task->refresh();
+
+        $this->assertSame($version, $task->lock_version);
+        $this->assertSame($updatedAt, $task->getRawOriginal('updated_at'));
+    }
+
+    public function test_admins_can_comment_without_membership_and_comment_html_is_escaped(): void
+    {
+        $task = $this->createTask();
+        $body = '<script>alert("comment")</script>';
+
+        $this->actingAs($this->admin)
+            ->post(
+                route('projects.tasks.comments.store', [$this->project, $task]),
+                ['body' => $body]
+            )
+            ->assertSessionHasNoErrors()
+            ->assertRedirect();
+
+        $this->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSee(e($body), false)
+            ->assertDontSee($body, false)
+            ->assertSeeText($this->admin->name);
+
+        $this->assertSame($body, $task->comments()->sole()->body);
+    }
+
+    public function test_guests_nonmembers_and_inactive_users_cannot_post_comments(): void
+    {
+        $task = $this->createTask();
+        $url = route('projects.tasks.comments.store', [$this->project, $task]);
+
+        $this->post($url, ['body' => 'Guest comment'])
+            ->assertRedirect(route('login'));
+
+        $this->actingAs(User::factory()->create())
+            ->post($url, ['body' => 'Outsider comment'])
+            ->assertForbidden();
+
+        $inactive = User::factory()->create(['is_active' => false]);
+        $this->project->members()->attach($inactive);
+
+        $this->actingAs($inactive)
+            ->post($url, ['body' => 'Inactive comment'])
+            ->assertRedirect(route('login'));
+
+        $this->assertSame(0, $task->comments()->count());
+    }
+
+    public function test_removed_members_cannot_read_or_add_comments(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+        $task = $this->createTask();
+
+        $this->actingAs($member)
+            ->post(
+                route('projects.tasks.comments.store', [$this->project, $task]),
+                ['body' => 'Comment before removal']
+            )
+            ->assertRedirect();
+
+        $this->project->members()->detach($member);
+
+        $this->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertForbidden();
+
+        $this->post(
+            route('projects.tasks.comments.store', [$this->project, $task]),
+            ['body' => 'Comment after removal']
+        )->assertForbidden();
+
+        $this->assertSame(1, $task->comments()->count());
+    }
+
+    public function test_comments_cannot_be_posted_through_another_projects_url(): void
+    {
+        $task = $this->createTask();
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->actingAs($this->admin)
+            ->post(
+                route('projects.tasks.comments.store', [$otherProject, $task]),
+                ['body' => 'Wrong project']
+            )
+            ->assertNotFound();
+
+        $this->assertSame(0, $task->comments()->count());
+    }
+
+    public function test_invalid_comments_are_rejected_and_forms_render_safely(): void
+    {
+        $task = $this->createTask();
+        $showUrl = route('projects.tasks.show', [$this->project, $task]);
+        $storeUrl = route('projects.tasks.comments.store', [$this->project, $task]);
+
+        $this->actingAs($this->admin);
+
+        foreach ([null, '', " \n\t ", ['invalid'], str_repeat('a', 5001)] as $body) {
+            $this->from($showUrl)
+                ->post($storeUrl, ['body' => $body])
+                ->assertRedirect($showUrl)
+                ->assertSessionHasErrors('body');
+
+            $this->get($showUrl)->assertOk();
+        }
+
+        $this->assertSame(0, $task->comments()->count());
+    }
+
+    public function test_comments_are_paginated_newest_first_and_scoped_to_the_task(): void
+    {
+        $task = $this->createTask();
+        $otherTask = $this->createTask();
+        $manager = app(TaskManager::class);
+
+        for ($number = 1; $number <= 21; $number++) {
+            $manager->addComment(
+                $this->admin,
+                $this->project,
+                $task,
+                sprintf('Comment entry [%02d]', $number)
+            );
+        }
+
+        $manager->addComment(
+            $this->admin,
+            $this->project,
+            $otherTask,
+            'Private to the other task'
+        );
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSeeText('Comment entry [21]')
+            ->assertDontSeeText('Comment entry [01]')
+            ->assertDontSeeText('Private to the other task')
+            ->assertViewHas('comments', function ($comments): bool {
+                return $comments->total() === 21
+                    && $comments->count() === 20
+                    && $comments->first()->body === 'Comment entry [21]';
+            });
+
+        $this->get(route('projects.tasks.show', [
+            'project' => $this->project,
+            'task' => $task,
+            'comments_page' => 2,
+        ]))
+            ->assertOk()
+            ->assertSeeText('Comment entry [01]')
+            ->assertDontSeeText('Comment entry [21]')
+            ->assertDontSeeText('Private to the other task')
+            ->assertViewHas('comments', function ($comments): bool {
+                return $comments->currentPage() === 2
+                    && $comments->count() === 1;
+            });
+    }
+
+    public function test_comment_writes_recheck_the_actors_current_database_access(): void
+    {
+        $task = $this->createTask();
+        $staleAdmin = $this->admin;
+
+        User::query()
+            ->whereKey($staleAdmin->id)
+            ->update(['role' => 'member']);
+
+        $this->actingAs($staleAdmin)
+            ->post(
+                route('projects.tasks.comments.store', [$this->project, $task]),
+                ['body' => 'Access was revoked']
+            )
+            ->assertForbidden();
+
+        $this->assertSame(0, $task->comments()->count());
+    }
+
     private function createTask(
         array $overrides = [],
         ?Project $project = null,
