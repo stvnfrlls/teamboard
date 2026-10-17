@@ -40,6 +40,11 @@ class Task extends Model
         ];
     }
 
+    public function activities(): HasMany
+    {
+        return $this->hasMany(TaskActivity::class);
+    }
+
     public function checklistItems(): HasMany
     {
         return $this->hasMany(TaskChecklistItem::class);

@@ -82,6 +82,10 @@ class TaskManager
                 }
             }
 
+            $before = $task === null
+                ? null
+                : $this->activitySnapshot($task);
+
             if ($task === null) {
                 $task = new Task;
                 $task->project()->associate($project);
@@ -111,6 +115,8 @@ class TaskManager
 
             $task->save();
             $task->setRelation('project', $project);
+
+            $this->recordActivity($actor, $task, $before);
 
             if (
                 $changesAssignee
@@ -196,6 +202,51 @@ class TaskManager
 
             return $item;
         }, 3);
+    }
+
+    protected function activitySnapshot(Task $task): array
+    {
+        return [
+            'title' => $task->title,
+            'description' => $task->description,
+            'status' => $task->status->value,
+            'priority' => $task->priority->value,
+            'assignee_id' => $task->assignee_id === null
+                ? null
+                : (int) $task->assignee_id,
+            'due_date' => $task->due_date?->format('Y-m-d'),
+        ];
+    }
+
+    protected function recordActivity(
+        User $actor,
+        Task $task,
+        ?array $before
+    ): void {
+        $changes = [];
+
+        if ($before !== null) {
+            foreach ($this->activitySnapshot($task) as $field => $value) {
+                if ($before[$field] !== $value) {
+                    $changes[$field] = [
+                        'old' => $before[$field],
+                        'new' => $value,
+                    ];
+                }
+            }
+
+            if ($changes === []) {
+                return;
+            }
+        }
+
+        $activity = $task->activities()->make([
+            'event' => $before === null ? 'created' : 'updated',
+            'changes' => $changes,
+        ]);
+
+        $activity->actor()->associate($actor);
+        $activity->save();
     }
 
     /**

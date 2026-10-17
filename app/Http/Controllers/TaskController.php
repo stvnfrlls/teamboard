@@ -9,6 +9,7 @@ use App\Http\Requests\SaveTaskRequest;
 use App\Http\Requests\UpdateTaskStatusRequest;
 use App\Models\Project;
 use App\Models\Task;
+use App\Models\User;
 use App\Services\TaskManager;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -144,11 +145,35 @@ class TaskController extends Controller
             ->withQueryString()
             ->fragment('checklist');
 
+        $activities = $task->activities()
+            ->with('actor:id,name')
+            ->orderByDesc('id')
+            ->paginate(20, ['*'], 'activity_page')
+            ->withQueryString()
+            ->fragment('activity');
+
+        $assigneeIds = $activities->getCollection()
+            ->flatMap(fn ($activity) => [
+                data_get($activity->changes, 'assignee_id.old'),
+                data_get($activity->changes, 'assignee_id.new'),
+            ])
+            ->filter(fn ($id) => is_int($id) && $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        $activityAssigneeNames = User::query()
+            ->whereKey($assigneeIds)
+            ->pluck('name', 'id')
+            ->all();
+
         return view('tasks.show', compact(
             'project',
             'task',
             'comments',
-            'checklistItems'
+            'checklistItems',
+            'activities',
+            'activityAssigneeNames'
         ));
     }
 

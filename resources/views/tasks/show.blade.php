@@ -82,4 +82,5 @@
     </div>
     @include('tasks.checklist')
     @include('tasks.comments')
+    @include('tasks.activity')
 </x-layouts.app>

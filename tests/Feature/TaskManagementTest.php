@@ -2047,6 +2047,344 @@ class TaskManagementTest extends TestCase
             ->assertViewHas('notifications', fn ($items) => $items->total() === 0);
     }
 
+    public function test_task_creation_records_the_authenticated_actor(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $this->actingAs($member)
+            ->post(route('projects.tasks.store', $this->project), $this->taskData([
+                'actor_id' => $this->admin->id,
+                'event' => 'forged',
+                'changes' => ['title' => ['old' => 'Forged']],
+            ]))
+            ->assertSessionHasNoErrors();
+
+        $task = Task::query()->sole();
+        $activity = $task->activities()->sole();
+
+        $this->assertSame($member->id, (int) $activity->actor_id);
+        $this->assertSame('created', $activity->event);
+        $this->assertSame([], $activity->changes);
+        $this->assertDatabaseCount('task_activities', 1);
+    }
+
+    public function test_task_activity_records_changed_values_and_escapes_html(): void
+    {
+        $member = User::factory()->create([
+            'name' => '<b>Assigned member</b>',
+        ]);
+        $this->project->members()->attach($member);
+
+        $oldTitle = '<script>oldTitle()</script>';
+        $newDescription = '<img src=x onerror=alert(1)>';
+
+        $task = $this->createTask([
+            'title' => $oldTitle,
+            'description' => 'Original description',
+        ]);
+
+        $this->actingAs($this->admin)
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task, [
+                    'title' => 'Updated title',
+                    'description' => $newDescription,
+                    'status' => TaskStatus::InProgress->value,
+                    'priority' => TaskPriority::Urgent->value,
+                    'assignee_id' => $member->id,
+                    'due_date' => '2026-12-15',
+                ])
+            )
+            ->assertSessionHasNoErrors();
+
+        $activity = $task->activities()->where('event', 'updated')->sole();
+
+        $this->assertSame($this->admin->id, (int) $activity->actor_id);
+        $this->assertEquals([
+            'title' => [
+                'old' => $oldTitle,
+                'new' => 'Updated title',
+            ],
+            'description' => [
+                'old' => 'Original description',
+                'new' => $newDescription,
+            ],
+            'status' => [
+                'old' => TaskStatus::Todo->value,
+                'new' => TaskStatus::InProgress->value,
+            ],
+            'priority' => [
+                'old' => TaskPriority::Normal->value,
+                'new' => TaskPriority::Urgent->value,
+            ],
+            'assignee_id' => [
+                'old' => null,
+                'new' => $member->id,
+            ],
+            'due_date' => [
+                'old' => null,
+                'new' => '2026-12-15',
+            ],
+        ], $activity->changes);
+
+        $this->assertDatabaseCount('task_activities', 2);
+
+        $this->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSeeText('Activity (2)')
+            ->assertSeeText('Previous value')
+            ->assertSeeText('Unassigned')
+            ->assertSeeText(TaskStatus::InProgress->label())
+            ->assertSee(e($oldTitle), false)
+            ->assertSee(e($newDescription), false)
+            ->assertSee(e($member->name), false)
+            ->assertDontSee($oldTitle, false)
+            ->assertDontSee($newDescription, false)
+            ->assertDontSee($member->name, false);
+    }
+
+    public function test_status_activity_preserves_historical_assignments(): void
+    {
+        $member = User::factory()->create();
+        $task = $this->createAssignedTask($member);
+
+        $member->update(['is_active' => false]);
+
+        $this->actingAs($this->admin)
+            ->patchJson(
+                route('projects.tasks.status', [$this->project, $task]),
+                [
+                    'status' => TaskStatus::Done->value,
+                    'lock_version' => $task->lock_version,
+                ]
+            )
+            ->assertOk();
+
+        $activity = $task->activities()->where('event', 'updated')->sole();
+
+        $this->assertEquals([
+            'status' => [
+                'old' => TaskStatus::Todo->value,
+                'new' => TaskStatus::Done->value,
+            ],
+        ], $activity->changes);
+
+        $this->assertSame($member->id, (int) $task->fresh()->assignee_id);
+        $this->assertNotNull($task->fresh()->completed_at);
+        $this->assertDatabaseCount('task_activities', 2);
+    }
+
+    public function test_unchanged_saves_comments_and_checklists_do_not_add_task_activity(): void
+    {
+        $task = $this->createTask();
+
+        $this->actingAs($this->admin)
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task)
+            )
+            ->assertSessionHasNoErrors();
+
+        $task = $task->fresh();
+
+        $this->patchJson(
+            route('projects.tasks.status', [$this->project, $task]),
+            [
+                'status' => $task->status->value,
+                'lock_version' => $task->lock_version,
+            ]
+        )->assertOk();
+
+        app(TaskManager::class)->addComment(
+            $this->admin,
+            $this->project,
+            $task,
+            'A separate discussion.'
+        );
+
+        $this->createChecklistItem($task);
+
+        $this->assertSame(1, $task->activities()->count());
+        $this->assertSame('created', $task->activities()->sole()->event);
+    }
+
+    public function test_rejected_task_changes_do_not_add_activity(): void
+    {
+        $task = $this->createTask();
+        $inactive = User::factory()->create(['is_active' => false]);
+        $this->project->members()->attach($inactive);
+
+        $this->actingAs($this->admin)
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task, [
+                    'title' => 'Stale change',
+                    'lock_version' => $task->lock_version + 1,
+                ])
+            )
+            ->assertSessionHasErrors('lock_version');
+
+        $this->put(
+            route('projects.tasks.update', [$this->project, $task]),
+            $this->editData($task, ['assignee_id' => $inactive->id])
+        )->assertSessionHasErrors('assignee_id');
+
+        $this->actingAs(User::factory()->create())
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task, ['title' => 'Unauthorized change'])
+            )
+            ->assertForbidden();
+
+        $this->assertSame($task->title, $task->fresh()->title);
+        $this->assertSame($task->lock_version, $task->fresh()->lock_version);
+        $this->assertDatabaseCount('task_activities', 1);
+    }
+
+    public function test_task_activity_rolls_back_with_creation_and_updates(): void
+    {
+        $task = $this->createTask();
+        $nextNumber = $this->project->fresh()->next_task_number;
+
+        try {
+            DB::transaction(function () use ($task) {
+                app(TaskManager::class)->save(
+                    $this->admin,
+                    $this->project,
+                    $this->editData($task, ['title' => 'Rolled back title']),
+                    $task
+                );
+
+                $this->createTask(['title' => 'Rolled back task']);
+
+                $this->assertDatabaseCount('task_activities', 3);
+
+                throw new \RuntimeException('Rollback activity.');
+            });
+
+            $this->fail('The transaction should have failed.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('Rollback activity.', $exception->getMessage());
+        }
+
+        $this->assertDatabaseCount('tasks', 1);
+        $this->assertDatabaseCount('task_activities', 1);
+        $this->assertSame($task->title, $task->fresh()->title);
+        $this->assertSame(
+            $nextNumber,
+            $this->project->fresh()->next_task_number
+        );
+    }
+
+    public function test_activity_is_paginated_newest_first_and_scoped_to_the_task(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+
+        $task = $this->createTask();
+        $creationId = $task->activities()->sole()->id;
+
+        for ($number = 1; $number <= 20; $number++) {
+            $task = app(TaskManager::class)->save(
+                $this->admin,
+                $this->project,
+                $this->editData($task, [
+                    'title' => 'Activity revision '.$number,
+                ]),
+                $task
+            );
+        }
+
+        $latestId = $task->activities()->max('id');
+        $this->createTask(['title' => 'Another task secret']);
+
+        $this->actingAs($member)
+            ->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSee('activity_page=2', false)
+            ->assertDontSeeText('Another task secret')
+            ->assertViewHas(
+                'activities',
+                fn ($items) => $items->total() === 21
+                    && $items->count() === 20
+                    && $items->first()->id === $latestId
+                    && $items->getCollection()->every(
+                        fn ($item) => (int) $item->task_id === $task->id
+                    )
+            );
+
+        $this->get(route('projects.tasks.show', [
+            'project' => $this->project,
+            'task' => $task,
+            'activity_page' => 2,
+        ]))
+            ->assertOk()
+            ->assertDontSeeText('Another task secret')
+            ->assertViewHas(
+                'activities',
+                fn ($items) => $items->total() === 21
+                    && $items->currentPage() === 2
+                    && $items->getCollection()->values()->modelKeys() === [$creationId]
+            );
+    }
+
+    public function test_activity_requires_current_project_access(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+        $task = $this->createTask();
+
+        $url = route('projects.tasks.show', [$this->project, $task]);
+
+        $this->get($url)->assertRedirect(route('login'));
+
+        $this->actingAs($member)
+            ->get($url)
+            ->assertOk()
+            ->assertSeeText('created this task.');
+
+        $this->project->members()->detach($member);
+
+        $this->get($url)->assertForbidden();
+
+        $this->actingAs(User::factory()->create())
+            ->get($url)
+            ->assertForbidden();
+
+        $member->update(['is_active' => false]);
+
+        $this->actingAs($member)
+            ->get($url)
+            ->assertRedirect(route('login'));
+
+        $otherProject = Project::factory()->create([
+            'created_by' => $this->admin->id,
+        ]);
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.show', [$otherProject, $task]))
+            ->assertNotFound();
+
+        $this->get($url)
+            ->assertOk()
+            ->assertSeeText('created this task.');
+    }
+
+    public function test_tasks_without_recorded_history_show_an_empty_state(): void
+    {
+        $task = $this->createTask();
+
+        // Simulate a task that existed before activity logging.
+        $task->activities()->delete();
+
+        $this->actingAs($this->admin)
+            ->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertOk()
+            ->assertSeeText('No activity recorded yet.')
+            ->assertViewHas('activities', fn ($items) => $items->total() === 0);
+    }
+
     private function createAssignedTask(
         User $assignee,
         array $overrides = [],
