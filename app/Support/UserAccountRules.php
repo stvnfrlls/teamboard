@@ -24,7 +24,12 @@ class UserAccountRules
             'is_active' => ['required', 'boolean'],
             'password' => $user
                 ? ['prohibited']
-                : ['required', 'string', Password::min(12), 'confirmed'],
+                : self::password(),
         ];
+    }
+
+    public static function password(): array
+    {
+        return ['required', 'string', Password::min(12), 'confirmed'];
     }
 }

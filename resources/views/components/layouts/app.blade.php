@@ -38,6 +38,10 @@
                         Users
                     </a>
                 @endcan
+                <a href="{{ route('password.edit') }}" @if (request()->routeIs('password.*')) aria-current="page" @endif
+                    class="rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    Change password
+                </a>
                 <span class="max-w-40 truncate text-sm text-slate-600 sm:max-w-64">
                     {{ auth()->user()->name }}
                 </span>
@@ -56,12 +60,7 @@
 
     <main id="main-content" class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <h1 class="mb-6 break-words text-2xl font-semibold tracking-tight">{{ $title }}</h1>
-        @if (session('status'))
-            <div role="status"
-                class="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                {{ session('status') }}
-            </div>
-        @endif
+        <x-flash-status class="mb-6" />
 
         {{ $slot }}
     </main>

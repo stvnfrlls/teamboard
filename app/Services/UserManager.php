@@ -7,6 +7,8 @@ use App\Models\User;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class UserManager
@@ -74,6 +76,43 @@ class UserManager
             $target->save();
 
             return $target;
+        }, 3);
+    }
+
+    public function changePassword(
+        User $actor,
+        string $currentPassword,
+        string $password
+    ): User {
+        return DB::transaction(function () use ($actor, $currentPassword, $password) {
+            $actor = User::query()
+                ->whereKey($actor->getKey())
+                ->lockForUpdate()
+                ->first();
+
+            abort_unless($actor && $actor->is_active, 403);
+
+            if (! Hash::check($currentPassword, $actor->password)) {
+                throw ValidationException::withMessages([
+                    'current_password' => 'Your current password is incorrect.',
+                ]);
+            }
+
+            if (Hash::check($password, $actor->password)) {
+                throw ValidationException::withMessages([
+                    'password' => 'Choose a password different from your current password.',
+                ]);
+            }
+
+            $actor->password = $password;
+            $actor->setRememberToken(Str::random(60));
+            $actor->save();
+
+            DB::table('sessions')
+                ->where('user_id', $actor->getKey())
+                ->delete();
+
+            return $actor;
         }, 3);
     }
 }

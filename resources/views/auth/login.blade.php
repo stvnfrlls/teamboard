@@ -16,6 +16,7 @@
             </div>
 
             <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+                <x-flash-status class="mb-5" />
                 <form method="POST" action="{{ route('login.store') }}" class="space-y-5">
                     @csrf
 

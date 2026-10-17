@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\Auth\PasswordController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ProjectController;
@@ -21,9 +22,14 @@ Route::middleware('guest:web')->group(function () {
         ->name('login.store');
 });
 
-Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
+Route::middleware(['auth:web', EnsureUserIsActive::class, 'auth.session'])->group(function () {
     Route::get('/dashboard', DashboardController::class)->name('dashboard');
     Route::get('/my-tasks', [TaskController::class, 'mine'])->name('tasks.mine');
+    Route::get('/account/password', [PasswordController::class, 'edit'])
+        ->name('password.edit');
+    Route::put('/account/password', [PasswordController::class, 'update'])
+        ->middleware('throttle:6,1')
+        ->name('password.update');
     Route::resource('projects', ProjectController::class)
         ->only(['index', 'create', 'store', 'show', 'edit', 'update']);
     Route::resource('users', UserController::class)
