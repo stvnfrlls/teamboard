@@ -13,6 +13,19 @@
                     class="rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
                     My Tasks
                 </a>
+                <a href="{{ route('notifications.index') }}"
+                    aria-label="Notifications, {{ $unreadNotificationCount }} unread"
+                    @if (request()->routeIs('notifications.*')) aria-current="page" @endif
+                    class="inline-flex items-center gap-2 rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    Notifications
+
+                    @if ($unreadNotificationCount > 0)
+                        <span aria-hidden="true"
+                            class="rounded-full bg-indigo-600 px-2 py-0.5 text-xs font-semibold text-white">
+                            {{ $unreadNotificationCount > 99 ? '99+' : $unreadNotificationCount }}
+                        </span>
+                    @endif
+                </a>
                 @can('viewAny', \App\Models\Project::class)
                     <a href="{{ route('projects.index') }}" @if (request()->routeIs('projects.*')) aria-current="page" @endif
                         class="rounded text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">

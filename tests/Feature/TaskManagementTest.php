@@ -9,9 +9,11 @@ use App\Models\Project;
 use App\Models\Task;
 use App\Models\TaskChecklistItem;
 use App\Models\User;
+use App\Notifications\TaskAssigned;
 use App\Services\TaskManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class TaskManagementTest extends TestCase
@@ -1728,6 +1730,321 @@ class TaskManagementTest extends TestCase
                 'projects' => 0,
             ])
             ->assertViewHas('tasks', fn ($tasks) => $tasks->isEmpty());
+    }
+
+    public function test_assignment_notifications_are_stored_and_rendered_safely(): void
+    {
+        $member = User::factory()->create();
+        $title = '<script>alert("assignment")</script>';
+        $task = $this->createAssignedTask($member, ['title' => $title]);
+        $notification = $member->notifications()->sole();
+
+        $this->assertSame(TaskAssigned::class, $notification->type);
+        $this->assertSame(['task_id' => $task->id], $notification->data);
+        $this->assertNull($notification->read_at);
+        $this->assertSame(0, $this->admin->notifications()->count());
+
+        $this->actingAs($member)
+            ->get(route('notifications.index'))
+            ->assertOk()
+            ->assertSee(e($title), false)
+            ->assertDontSee($title, false)
+            ->assertSee('Notifications, 1 unread', false)
+            ->assertSee(route('projects.tasks.show', [$this->project, $task]), false)
+            ->assertViewHas('notifications', fn ($items) => $items->total() === 1);
+
+        $this->assertNull($notification->fresh()->read_at);
+    }
+
+    public function test_unchanged_assignments_status_changes_and_self_assignments_do_not_notify(): void
+    {
+        $member = User::factory()->create();
+        $task = $this->createAssignedTask($member);
+
+        $this->actingAs($this->admin)
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task, ['title' => 'Updated title'])
+            )
+            ->assertSessionHasNoErrors()
+            ->assertRedirect();
+
+        $task->refresh();
+
+        $this->patchJson(
+            route('projects.tasks.status', [$this->project, $task]),
+            [
+                'status' => TaskStatus::InProgress->value,
+                'lock_version' => $task->lock_version,
+            ]
+        )->assertOk();
+
+        $this->createAssignedTask($this->admin);
+
+        $this->assertSame(1, $member->notifications()->count());
+        $this->assertSame(0, $this->admin->notifications()->count());
+    }
+
+    public function test_reassignment_notifies_only_the_new_assignee(): void
+    {
+        $first = User::factory()->create();
+        $second = User::factory()->create();
+        $task = $this->createAssignedTask($first);
+
+        $this->project->members()->attach($second);
+        $manager = app(TaskManager::class);
+
+        $task = $manager->save(
+            $this->admin,
+            $this->project,
+            $this->editData($task, ['assignee_id' => $second->id]),
+            $task
+        );
+
+        $this->assertSame(1, $first->notifications()->count());
+        $this->assertSame(1, $second->notifications()->count());
+
+        $task = $manager->save(
+            $this->admin,
+            $this->project,
+            $this->editData($task, ['assignee_id' => null]),
+            $task
+        );
+
+        $this->assertSame(1, $first->notifications()->count());
+        $this->assertSame(1, $second->notifications()->count());
+
+        $manager->save(
+            $this->admin,
+            $this->project,
+            $this->editData($task, ['assignee_id' => $second->id]),
+            $task
+        );
+
+        $this->assertSame(1, $first->notifications()->count());
+        $this->assertSame(2, $second->notifications()->count());
+    }
+
+    public function test_rejected_assignment_changes_do_not_create_notifications(): void
+    {
+        $member = User::factory()->create();
+        $inactive = User::factory()->create(['is_active' => false]);
+
+        $this->project->members()->attach([$member->id, $inactive->id]);
+        $task = $this->createTask();
+
+        app(TaskManager::class)->save(
+            $this->admin,
+            $this->project,
+            ['status' => TaskStatus::InProgress->value, 'lock_version' => 0],
+            $task
+        );
+
+        $this->actingAs($this->admin)
+            ->put(
+                route('projects.tasks.update', [$this->project, $task]),
+                $this->editData($task, ['assignee_id' => $member->id])
+            )
+            ->assertSessionHasErrors('lock_version');
+
+        $task->refresh();
+
+        $this->put(
+            route('projects.tasks.update', [$this->project, $task]),
+            $this->editData($task, ['assignee_id' => $inactive->id])
+        )->assertSessionHasErrors('assignee_id');
+
+        $this->assertNull($task->fresh()->assignee_id);
+        $this->assertSame(0, $member->notifications()->count());
+        $this->assertSame(0, $inactive->notifications()->count());
+    }
+
+    public function test_assignment_notifications_roll_back_with_the_task(): void
+    {
+        $member = User::factory()->create();
+        $this->project->members()->attach($member);
+        $nextNumber = $this->project->fresh()->next_task_number;
+
+        try {
+            DB::transaction(function () use ($member) {
+                $this->createTask(['assignee_id' => $member->id]);
+
+                $this->assertSame(1, $member->notifications()->count());
+
+                throw new \RuntimeException('Rollback assignment');
+            });
+
+            $this->fail('The transaction should have been rolled back.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('Rollback assignment', $exception->getMessage());
+        }
+
+        $this->assertSame(0, $this->project->tasks()->count());
+        $this->assertSame(0, $member->notifications()->count());
+        $this->assertSame($nextNumber, $this->project->fresh()->next_task_number);
+    }
+
+    public function test_notification_reads_are_owned_scoped_and_idempotent(): void
+    {
+        $member = User::factory()->create();
+        $other = User::factory()->create();
+
+        $this->createAssignedTask($member, ['title' => 'First owned alert']);
+        $this->createAssignedTask($member, ['title' => 'Second owned alert']);
+        $this->createAssignedTask($other, ['title' => 'Other persons alert']);
+
+        $owned = $member->notifications()->firstOrFail();
+        $foreign = $other->notifications()->sole();
+
+        $this->actingAs($member)
+            ->get(route('notifications.index'))
+            ->assertOk()
+            ->assertDontSeeText('Other persons alert')
+            ->assertSee('Notifications, 2 unread', false)
+            ->assertViewHas('notifications', fn ($items) => $items->total() === 2);
+
+        $this->patch(route('notifications.read', $foreign->id))
+            ->assertNotFound();
+
+        $this->actingAs($this->admin)
+            ->patch(route('notifications.read', $owned->id))
+            ->assertNotFound();
+
+        $this->actingAs($member)
+            ->patch(route('notifications.read', $owned->id))
+            ->assertRedirect(route('notifications.index'));
+
+        $readAt = $owned->fresh()->read_at;
+        $this->assertNotNull($readAt);
+        $this->assertSame(1, $member->unreadNotifications()->count());
+
+        $this->travel(1)->minutes();
+
+        $this->patch(route('notifications.read', $owned->id))
+            ->assertRedirect(route('notifications.index'));
+
+        $this->assertEquals($readAt, $owned->fresh()->read_at);
+
+        $this->patch(route('notifications.read-all'))
+            ->assertRedirect(route('notifications.index'));
+
+        $this->assertSame(0, $member->unreadNotifications()->count());
+        $this->assertSame(1, $other->unreadNotifications()->count());
+        $this->assertEquals($readAt, $owned->fresh()->read_at);
+        $this->assertNull($foreign->fresh()->read_at);
+
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertSee('Notifications, 0 unread', false);
+    }
+
+    public function test_notifications_hide_task_details_after_project_access_is_removed(): void
+    {
+        $member = User::factory()->create();
+        $task = $this->createAssignedTask($member, [
+            'title' => 'Confidential task details',
+        ]);
+        $notification = $member->notifications()->sole();
+
+        $this->project->members()->detach($member);
+
+        $this->actingAs($member)
+            ->get(route('notifications.index'))
+            ->assertOk()
+            ->assertSeeText('This task is no longer available.')
+            ->assertDontSeeText($task->title)
+            ->assertDontSeeText($this->project->name)
+            ->assertDontSee(route('projects.tasks.show', [$this->project, $task]), false)
+            ->assertViewHas('tasks', fn ($tasks) => $tasks->isEmpty());
+
+        $this->get(route('projects.tasks.show', [$this->project, $task]))
+            ->assertForbidden();
+
+        $this->patch(route('notifications.read', $notification->id))
+            ->assertRedirect(route('notifications.index'));
+
+        $this->assertNotNull($notification->fresh()->read_at);
+    }
+
+    public function test_notifications_are_paginated_and_unread_counts_cover_all_pages(): void
+    {
+        $member = User::factory()->create();
+        $oldestTask = null;
+
+        for ($number = 1; $number <= 21; $number++) {
+            $task = $this->createAssignedTask($member, [
+                'title' => sprintf('Notification task [%02d]', $number),
+            ]);
+
+            $oldestTask ??= $task;
+            $this->travel(1)->seconds();
+        }
+
+        $this->createAssignedTask(
+            User::factory()->create(),
+            ['title' => 'Another inbox task']
+        );
+
+        $this->actingAs($member)
+            ->get(route('notifications.index'))
+            ->assertOk()
+            ->assertSee('page=2', false)
+            ->assertSee('Notifications, 21 unread', false)
+            ->assertDontSeeText($oldestTask->title)
+            ->assertDontSeeText('Another inbox task')
+            ->assertViewHas(
+                'notifications',
+                fn ($items) => $items->total() === 21 && $items->count() === 20
+            );
+
+        $this->get(route('notifications.index', ['page' => 2]))
+            ->assertOk()
+            ->assertSeeText($oldestTask->title)
+            ->assertSee('Notifications, 21 unread', false)
+            ->assertDontSeeText('Another inbox task')
+            ->assertViewHas(
+                'notifications',
+                fn ($items) => $items->currentPage() === 2 && $items->count() === 1
+            )
+            ->assertViewHas(
+                'tasks',
+                fn ($tasks) => $tasks->values()->modelKeys() === [$oldestTask->id]
+            );
+    }
+
+    public function test_notification_routes_require_active_login_and_handle_empty_inboxes(): void
+    {
+        $member = User::factory()->create();
+        $this->createAssignedTask($member);
+        $notification = $member->notifications()->sole();
+
+        $routes = [
+            ['get', 'notifications.index', []],
+            ['patch', 'notifications.read', ['notification' => $notification->id]],
+            ['patch', 'notifications.read-all', []],
+        ];
+
+        foreach ($routes as [$method, $name, $parameters]) {
+            $this->{$method}(route($name, $parameters))
+                ->assertRedirect(route('login'));
+        }
+
+        $member->update(['is_active' => false]);
+
+        foreach ($routes as [$method, $name, $parameters]) {
+            $this->actingAs($member)
+                ->{$method}(route($name, $parameters))
+                ->assertRedirect(route('login'));
+        }
+
+        $this->assertNull($notification->fresh()->read_at);
+
+        $this->actingAs(User::factory()->create())
+            ->get(route('notifications.index'))
+            ->assertOk()
+            ->assertSeeText('No notifications yet.')
+            ->assertSee('Notifications, 0 unread', false)
+            ->assertViewHas('notifications', fn ($items) => $items->total() === 0);
     }
 
     private function createAssignedTask(

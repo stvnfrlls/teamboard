@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\TaskChecklistItemController;
 use App\Http\Controllers\TaskCommentController;
@@ -47,6 +48,14 @@ Route::middleware(['auth:web', EnsureUserIsActive::class])->group(function () {
             [TaskChecklistItemController::class, 'update']
         )->name('projects.tasks.checklist.update');
     });
+
+    Route::get('/notifications', [NotificationController::class, 'index'])
+        ->name('notifications.index');
+    Route::patch('/notifications/read-all', [NotificationController::class, 'markAllRead'])
+        ->name('notifications.read-all');
+    Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead'])
+        ->whereUuid('notification')
+        ->name('notifications.read');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');

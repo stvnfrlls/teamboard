@@ -8,6 +8,7 @@ use App\Models\Task;
 use App\Models\TaskChecklistItem;
 use App\Models\TaskComment;
 use App\Models\User;
+use App\Notifications\TaskAssigned;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -110,6 +111,17 @@ class TaskManager
 
             $task->save();
             $task->setRelation('project', $project);
+
+            if (
+                $changesAssignee
+                && $assigneeId !== null
+                && $assigneeId !== (int) $actor->getKey()
+                && ($task->wasRecentlyCreated || $task->wasChanged('assignee_id'))
+            ) {
+                $lockedUsers->get($assigneeId)->notify(
+                    new TaskAssigned((int) $task->getKey())
+                );
+            }
 
             return $task;
         }, 3);
