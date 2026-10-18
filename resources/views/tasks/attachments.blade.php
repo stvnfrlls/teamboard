@@ -5,36 +5,37 @@
     $uploadHelp = 'One file, up to ' . $maxMegabytes . ' MB. Allowed: ' . strtoupper(implode(', ', $extensions)) . '.';
 @endphp
 
-<section id="attachments" aria-labelledby="attachments-heading"
-    class="mt-6 rounded-xl border border-slate-200 bg-white p-6">
-    <h2 id="attachments-heading" class="text-lg font-semibold">
+<section id="attachments" aria-labelledby="attachments-heading" class="ui-card mt-6 scroll-mt-24 p-6 sm:p-8">
+    <h2 id="attachments-heading" class="text-lg font-semibold text-slate-900">
         Attachments ({{ $attachments->total() }})
     </h2>
 
+    <p class="mt-1 text-sm text-slate-500">
+        Files shared with this task.
+    </p>
+
     @can('update', $task)
         <form method="POST" action="{{ route('projects.tasks.attachments.store', [$project, $task]) }}"
-            enctype="multipart/form-data" class="mt-5 space-y-4">
+            enctype="multipart/form-data" class="mt-6 space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
             @csrf
 
             <x-form.file name="attachment" label="Choose a file" :accept="$accept" :help="$uploadHelp" required />
 
-            <button type="submit"
-                class="cursor-pointer rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+            <button type="submit" class="ui-button ui-button-primary">
                 Upload attachment
             </button>
         </form>
     @endcan
 
-    <ul class="mt-6 divide-y divide-slate-100">
+    <ul class="mt-6 space-y-3">
         @forelse ($attachments as $attachment)
-            <li class="py-4">
+            <li class="min-w-0 rounded-xl border border-slate-200 p-4 sm:p-5">
                 <a href="{{ route('projects.tasks.attachments.download', [$project, $task, $attachment]) }}"
-                    aria-label="Download {{ $attachment->original_name }}"
-                    class="rounded break-all text-sm font-semibold text-indigo-700 underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                    aria-label="Download {{ $attachment->original_name }}" class="ui-link break-all text-sm">
                     {{ $attachment->original_name }}
                 </a>
 
-                <p class="mt-2 break-words text-xs leading-5 text-slate-500">
+                <p class="mt-2 break-words text-xs leading-6 text-slate-500">
                     {{ number_format($attachment->size / 1024, 1) }} KB
                     · Uploaded by {{ $attachment->uploader?->name ?? 'Unknown user' }}
                     ·
@@ -44,11 +45,15 @@
                 </p>
             </li>
         @empty
-            <li class="py-4 text-sm text-slate-500">
+            <li class="rounded-xl border border-dashed border-slate-200 px-5 py-10 text-center text-sm text-slate-500">
                 No attachments yet.
             </li>
         @endforelse
     </ul>
 
-    {{ $attachments->links() }}
+    @if ($attachments->hasPages())
+        <div class="mt-6">
+            {{ $attachments->links() }}
+        </div>
+    @endif
 </section>

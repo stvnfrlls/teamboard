@@ -6,7 +6,7 @@
     </label>
 
     @if ($help)
-        <p id="{{ $name }}-help" class="mb-3 text-sm text-slate-500">
+        <p id="{{ $name }}-help" class="mb-3 text-xs leading-6 text-slate-500">
             {{ $help }}
         </p>
     @endif
@@ -15,9 +15,7 @@
         @if ($errors->has($name)) aria-invalid="true" @endif
         @if ($help || $errors->has($name)) aria-describedby="{{ trim(($help ? $name . '-help ' : '') . ($errors->has($name) ? $name . '-error' : '')) }}" @endif
         {{ $attributes->class([
-            'block w-full min-w-0 rounded-lg border bg-white p-3 text-sm text-slate-700 file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:font-semibold file:text-indigo-700 focus:outline-2 focus:outline-offset-2 focus:outline-indigo-600',
-            'border-red-500' => $errors->has($name),
-            'border-slate-300' => !$errors->has($name),
+            'ui-control min-w-0 file:mr-3 file:cursor-pointer file:rounded-lg file:border-0 file:bg-indigo-50 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-indigo-700 hover:file:bg-indigo-100',
         ]) }}>
 
     @error($name)

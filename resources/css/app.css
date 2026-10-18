@@ -6,6 +6,217 @@
 @source '../**/*.js';
 
 @theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
+    --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@layer base {
+    body {
+        background: #f5f7fb;
+    }
+}
+
+@layer components {
+    .ui-card {
+        @apply rounded-2xl border border-slate-200 bg-white;
+        box-shadow: 0 2px 8px rgb(15 23 42 / 3%);
+    }
+
+    .ui-button {
+        @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold no-underline transition-colors;
+    }
+
+    .ui-button-primary {
+        @apply bg-indigo-600 text-white hover:bg-indigo-700;
+    }
+
+    .ui-button-secondary {
+        @apply border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50;
+    }
+
+    .ui-button:disabled {
+        @apply cursor-not-allowed opacity-50;
+    }
+
+    .ui-link {
+        @apply rounded-md font-semibold text-indigo-700 no-underline transition-colors;
+        box-decoration-break: clone;
+        -webkit-box-decoration-break: clone;
+    }
+
+    .ui-link:hover {
+        @apply bg-indigo-50 text-indigo-900 no-underline;
+    }
+
+    .ui-nav-link {
+        @apply flex min-h-11 items-center justify-between gap-3 rounded-xl border border-transparent px-3 py-2.5 text-sm font-medium text-slate-600 no-underline transition-colors;
+    }
+
+    .ui-nav-link:hover {
+        @apply bg-slate-100 text-slate-900;
+    }
+
+    .ui-nav-link[aria-current='page'] {
+        @apply border-indigo-100 bg-indigo-50 font-semibold text-indigo-700;
+    }
+
+    .ui-control {
+        @apply block min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 transition-colors;
+        box-shadow: 0 1px 2px rgb(15 23 42 / 3%);
+    }
+
+    .ui-control::placeholder {
+        @apply text-slate-400;
+    }
+
+    .ui-control:hover:not(:disabled) {
+        @apply border-slate-400;
+    }
+
+    .ui-control:focus {
+        @apply border-indigo-400 outline-2 outline-offset-2 outline-indigo-500;
+    }
+
+    .ui-control[aria-invalid='true'] {
+        @apply border-red-500;
+    }
+
+    .ui-control:disabled {
+        @apply cursor-not-allowed bg-slate-100 text-slate-500;
+    }
+
+    .ui-stat {
+        @apply block p-5 no-underline transition-colors hover:border-indigo-300 hover:bg-slate-50;
+        --stat-accent: var(--color-indigo-700);
+    }
+
+    .ui-stat-rose {
+        --stat-accent: var(--color-rose-700);
+    }
+
+    .ui-stat-amber {
+        --stat-accent: var(--color-amber-700);
+    }
+
+    .ui-stat-emerald {
+        --stat-accent: var(--color-emerald-700);
+    }
+
+    .ui-stat-dot {
+        @apply size-2 shrink-0 rounded-full;
+        background: var(--stat-accent);
+    }
+
+    .ui-stat-hint {
+        @apply mt-4 block text-xs font-semibold;
+        color: var(--stat-accent);
+    }
+
+    .ui-button:focus-visible,
+    .ui-link:focus-visible,
+    .ui-nav-link:focus-visible,
+    .ui-stat:focus-visible {
+        @apply outline-2 outline-offset-2 outline-indigo-500;
+    }
+
+    .ui-menu>summary {
+        list-style: none;
+    }
+
+    .ui-menu>summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .ui-table-label {
+        display: none;
+    }
+
+    .ui-cell-value {
+        min-width: 0;
+        overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 47.999rem) {
+        .ui-table-frame.ui-card {
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .ui-responsive-table {
+            display: block;
+            width: 100%;
+        }
+
+        .ui-responsive-table tbody {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 1rem;
+        }
+
+        .ui-responsive-table tbody tr {
+            display: block;
+            min-width: 0;
+            border: 1px solid var(--color-slate-200);
+            border-radius: var(--radius-2xl);
+            background: var(--color-white);
+            padding: 1rem;
+        }
+
+        .ui-responsive-table tbody th,
+        .ui-responsive-table tbody td {
+            display: grid;
+            grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr);
+            align-items: start;
+            gap: 0.75rem;
+            padding: 0.5rem 0;
+        }
+
+        .ui-responsive-table .ui-table-label {
+            display: block;
+            font-family: var(--font-sans);
+            font-size: 0.75rem;
+            font-weight: 500;
+            line-height: 1.5rem;
+            color: var(--color-slate-500);
+        }
+
+        .ui-responsive-table .ui-table-empty-cell {
+            display: block;
+            padding: 1.5rem 0;
+            text-align: center;
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+        .ui-button,
+        .ui-link,
+        .ui-nav-link,
+        .ui-control,
+        .ui-stat {
+            transition: none;
+        }
+    }
+}
+
+.ui-sidebar {
+    display: none;
+}
+
+@media (min-width: 64rem) {
+    .ui-sidebar {
+        display: flex;
+    }
+
+    .ui-shell-content {
+        padding-left: 16rem;
+    }
+
+    .ui-shell[data-sidebar-collapsed='true'] .ui-sidebar {
+        display: none;
+    }
+
+    .ui-shell[data-sidebar-collapsed='true'] .ui-shell-content {
+        padding-left: 0;
+    }
 }
